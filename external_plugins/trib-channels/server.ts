@@ -180,7 +180,7 @@ const INSTRUCTIONS = [
 const mcp = new Server(
   { name: 'trib-channels', version: PLUGIN_VERSION },
   {
-    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
+    capabilities: { tools: {}, experimental: { 'claude/channel': {}, 'claude/channel/permission': {} } },
     instructions: INSTRUCTIONS,
   },
 )
