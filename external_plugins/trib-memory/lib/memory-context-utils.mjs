@@ -18,16 +18,13 @@ export function formatHintAge(ts, nowTs = Date.now()) {
   return `${days}d`
 }
 
-export function computeHintRelevance(item, options = {}) {
-  const queryTokenCount = Math.max(1, Number(options.queryTokenCount ?? 1))
+export function computeHintRelevance(item, _options = {}) {
+  // RRF + semantic scoring: classification ~0.15-0.40, episode ~0.01-0.04
   const weighted = Number(item?.weighted_score)
-  if (Number.isFinite(weighted)) return clamp01((-weighted + 0.15) / 1.35)
-  const priority = Number(item?.priority_score)
-  if (Number.isFinite(priority)) return clamp01(priority / 4.5)
-  const rank = Number(item?.rankScore)
-  if (Number.isFinite(rank)) return clamp01(rank / 5.5)
-  const overlap = Number(item?.overlapCount ?? 0)
-  return clamp01(overlap / Math.min(3, queryTokenCount))
+  if (Number.isFinite(weighted) && weighted > 0) {
+    return clamp01(Math.min(1, weighted / 0.4))
+  }
+  return 0
 }
 
 export function shouldInjectHint(item, overrides = {}, options = {}) {
