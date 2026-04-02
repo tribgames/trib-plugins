@@ -436,6 +436,14 @@ export class MemoryStore {
 
       CREATE VIRTUAL TABLE IF NOT EXISTS classifications_fts
         USING fts5(classification, topic, element, state, tokenize='trigram');
+    `)
+
+    // importance column migration
+    try {
+      this.db.exec(`ALTER TABLE classifications ADD COLUMN importance TEXT DEFAULT ''`)
+    } catch { /* already exists */ }
+
+    this.db.exec(`
 
       CREATE TABLE IF NOT EXISTS memory_meta (
         key TEXT PRIMARY KEY,

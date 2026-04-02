@@ -2,140 +2,106 @@
 
 ## Overview
 
-Memory decay is not uniform. Some memories should persist indefinitely (rules, decisions),
-while others fade naturally (one-off questions, resolved incidents).
+Memory decay is not uniform. Some memories persist almost forever (rules, decisions),
+while others fade quickly (one-off questions).
 
-This plan defines how trib-memory determines what to remember and how long.
+Single power-law curve, controlled by per-tag factor applied to the decay amount.
 
-## Tags
+## Classification Schema
 
-cycle1 outputs importance tags alongside topic/element/state.
-Tags describe the **nature of the memory**, not its emotional content.
+```
+cycle1 output: topic, element, importance
+```
 
-### Tag Definitions
+3 fields. No state, no classification (대주제).
 
-| Tag | Meaning | Examples |
-|-----|---------|---------|
-| rule | Policy, constraint, prohibition | "절대 -p 쓰지 마", "커밋에 Claude 서명 금지" |
-| directive | Strong user request, command, emphasis | "무조건 이렇게 가자", "이건 꼭 기억해" |
-| decision | Agreement, confirmed direction | "3필드로 간다", "올라마 디폴트로" |
-| preference | Taste, style, personal choice | "재영님으로 불러줘", "존댓말 써" |
-| incident | Something that happened, outage, change | "디스코드 메시지 안 옴", "서비스 SIGKILL" |
-| interest | Tracked topic, recurring across sessions | Determined by day_count, not LLM |
-| transient | One-off question, confirmation, check | "이거 맞아?", "확인해봐" |
+- **topic**: concise phrase, what the conversation is about
+- **element**: central keyword/object, most discriminative field
+- **importance**: tags from predefined set, comma-separated
 
-### Tag Properties
+## Importance Tags
 
-**Long-term (no decay, supersede only):**
-- rule, directive, decision, preference
+LLM picks applicable tags. Empty if unclear.
 
-**Short-term (power-law decay):**
-- incident: halfLife 60 days
-- interest: halfLife 45 days (boosted by day_count)
-- transient: halfLife 7 days
+| Tag | Meaning | tag_factor | Effect |
+|-----|---------|-----------|--------|
+| rule | Policy, constraint, prohibition | 0.0 | Never decays |
+| directive | Strong user request, emphasis | 0.1 | Almost never |
+| decision | Agreement, confirmed direction | 0.2 | Very slow |
+| preference | Taste, style, personal choice | 0.15 | Very slow |
+| incident | Something that happened, outage | 0.5 | Half speed |
+| transient | One-off question, confirmation | 1.5 | Fast decay |
+| (empty) | Default, no clear signal | 1.0 | Normal curve |
+
+`interest` removed — day_count/frequency are unreliable signals
+(long debugging sessions ≠ interest, "커밋하자" every day ≠ interest).
 
 ## Decay Model
 
-### Power-Law Curve
+### Power-Law Base Curve
 
 ```
-time_factor = max(floor, 1 / (1 + age / halfLife) ^ alpha)
+decay = 1 / (1 + age / halfLife) ^ alpha
+
+halfLife = 30 days
+alpha = 0.3
 ```
 
-- alpha: 0.3 (gentle slope)
-- floor: 0.2 (never fully forgotten in search)
-
-### Long-Term Override
-
-If any tag is long-term (rule/directive/decision/preference):
-- time_factor = 1.0 always
-- Only removed by supersede (newer memory on same topic replaces it)
-
-### Retrieval Boost
+### Tag Factor Applied to Loss
 
 ```
-effective_halfLife = halfLife * (1 + 0.1 * log(retrieval_count + 1))
+loss = 1 - decay
+actual_loss = loss * tag_factor
+time_factor = 1 - actual_loss
 ```
 
-Frequently retrieved memories decay slower.
+Examples at 90 days:
 
-### Day-Count Interest Detection
+| Tag | tag_factor | time_factor |
+|-----|-----------|-------------|
+| rule | 0.0 | 1.00 |
+| directive | 0.1 | 0.97 |
+| preference | 0.15 | 0.95 |
+| decision | 0.2 | 0.93 |
+| incident | 0.5 | 0.83 |
+| (default) | 1.0 | 0.66 |
+| transient | 1.5 | 0.50 |
+
+### Multiple Tags
+
+When multiple tags present, use the **lowest tag_factor** (most important wins).
 
 ```
-day_count = number of distinct day_keys where this element appears
+tag_factor = min(factors for all tags)
 ```
-
-- day_count >= 3 → auto-tag `interest` (if not already tagged)
-- day_count amplifies halfLife: `halfLife * (1 + 0.2 * day_count)`
-
-Not raw mention frequency — cross-session recurrence is the signal.
 
 ## Context.md Promotion
 
-### Immediate Promotion Signal
+When cycle1 produces a tag with factor < 0.5 (rule/directive/decision/preference/incident):
+- Check for duplicate in context.md (same element)
+- New → append
+- Duplicate → merge (newer version)
+- Contradiction → supersede (replace old)
 
-When cycle1 produces a long-term tag (rule/directive/decision/preference):
-- Check for duplicate in context.md (same element + topic)
-- If new → append to context.md
-- If duplicate → merge (keep newer version)
-- If contradicts existing → supersede (replace, mark old as deprecated)
+## Supersede Logic
 
-### Supersede Logic
+Same element + contradicting content → replace.
+Mark old as deprecated with `superseded_by` reference.
 
-When a new memory contradicts an existing long-term memory:
-1. Same element + same topic + different content → supersede
-2. Mark old entry with `superseded_by` reference
-3. Replace in context.md
+## Retrieval Count
 
-Example:
-- Old: "절대 -p 쓰지 마" (rule)
-- New: "이제 -p 써도 돼" (rule, same element)
-- Result: old deprecated, new promoted
+Tracked in DB (retrieval_count column, already exists).
+NOT used in decay calculation for now.
+Reserved for future calibration when enough data accumulates.
 
 ## Cycle Integration
 
-### cycle1 (every 5 min)
-- Extract: topic, element, state, tags[]
-- Long-term tag detected → immediate context.md promotion signal
-
-### cycle2 (daily or threshold)
-- Duplicate detection across classifications
-- Merge similar entries
-- Supersede contradictions
-- Validate long-term entries still hold
-
-### cycle3 (weekly)
-- Rebuild context.md from validated long-term classifications
-- Prune deprecated entries
-- Update day_count for interest detection
-
-## Prompt Addition
-
-cycle1 prompt gets one more column:
-
-```
-case_id,text,topic,element,state,tags
-```
-
-tags: comma-separated from [rule, directive, decision, preference, incident, transient].
-Empty if none clearly apply. Multiple allowed.
-
-`interest` is NOT output by LLM — derived from day_count automatically.
-
-## Score Integration
-
-```
-final_score = (base_rrf + semantic_bonus) * state_factor * time_factor * lang_factor
-```
-
-time_factor is now tag-aware:
-- Long-term tags → 1.0
-- Short-term tags → power-law with tag-specific halfLife
-- No tags → default halfLife (30 days)
+- **cycle1** (periodic): extract topic, element, importance → tag detected with factor < 0.5 → context.md promotion signal
+- **cycle2** (daily): duplicate/merge/supersede validation
+- **cycle3** (weekly): rebuild context.md from validated long-term entries
 
 ## Open Questions
 
-1. How aggressive should supersede be? Conservative (require high similarity) vs liberal?
-2. Should long-term entries ever expire? Maybe after 1 year with 0 retrieval?
-3. Day-count interest: what threshold? 3 days? 5 days?
-4. Should context.md have a max size? Prune lowest-importance long-term entries?
+1. Supersede aggressiveness — how similar must element+topic be to trigger?
+2. Should rule/directive ever expire? (e.g., 1 year with 0 retrieval)
+3. context.md max size — prune lowest-importance entries when full?
