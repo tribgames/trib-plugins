@@ -46,123 +46,19 @@ export function getPendingCandidateDays(store, limit = 7, minCount = 1) {
   `).all(minCount, limit)
 }
 
-export function getDecayRows(store, kind = 'fact') {
-  if (kind === 'fact') {
-    return store.db.prepare(`
-      SELECT id, mention_count, retrieval_count, last_seen, first_seen
-      FROM facts
-      WHERE status = 'active'
-    `).all()
-  }
-  if (kind === 'task') {
-    return store.db.prepare(`
-      SELECT id, retrieval_count, last_seen, first_seen
-      FROM tasks
-      WHERE status = 'active'
-    `).all()
-  }
-  if (kind === 'signal') {
-    return store.db.prepare(`
-      SELECT id, retrieval_count, last_seen, first_seen
-      FROM signals
-      WHERE status = 'active'
-    `).all()
-  }
+export function getDecayRows(_store, _kind = 'fact') {
   return []
 }
 
-export function markRowsDeprecated(store, kind = 'fact', ids = [], seenAt = null) {
-  const normalizedIds = [...new Set(ids.map(id => Number(id)).filter(Number.isFinite))]
-  if (normalizedIds.length === 0 || !seenAt) return 0
-  const placeholders = normalizedIds.map(() => '?').join(', ')
-  if (kind === 'fact') {
-    return Number(store.db.prepare(`
-      UPDATE facts
-      SET status = 'deprecated', last_seen = ?
-      WHERE id IN (${placeholders})
-    `).run(seenAt, ...normalizedIds).changes ?? 0)
-  }
-  if (kind === 'task') {
-    return Number(store.db.prepare(`
-      UPDATE tasks
-      SET status = 'deprecated', last_seen = ?
-      WHERE id IN (${placeholders})
-    `).run(seenAt, ...normalizedIds).changes ?? 0)
-  }
-  if (kind === 'signal') {
-    return Number(store.db.prepare(`
-      UPDATE signals
-      SET status = 'deprecated', last_seen = ?
-      WHERE id IN (${placeholders})
-    `).run(seenAt, ...normalizedIds).changes ?? 0)
-  }
+export function markRowsDeprecated(_store, _kind = 'fact', _ids = [], _seenAt = null) {
   return 0
 }
 
-export function listDeprecatedIds(store, kind = 'fact', olderThan = '') {
-  if (!olderThan) return []
-  if (kind === 'fact') {
-    return store.db.prepare(`
-      SELECT id
-      FROM facts
-      WHERE status = 'deprecated' AND last_seen < ?
-    `).all(olderThan).map(row => Number(row.id)).filter(Number.isFinite)
-  }
-  if (kind === 'task') {
-    return store.db.prepare(`
-      SELECT id
-      FROM tasks
-      WHERE status = 'deprecated' AND last_seen < ?
-    `).all(olderThan).map(row => Number(row.id)).filter(Number.isFinite)
-  }
-  if (kind === 'signal') {
-    return store.db.prepare(`
-      SELECT id
-      FROM signals
-      WHERE status = 'deprecated' AND last_seen < ?
-    `).all(olderThan).map(row => Number(row.id)).filter(Number.isFinite)
-  }
+export function listDeprecatedIds(_store, _kind = 'fact', _olderThan = '') {
   return []
 }
 
-export function deleteRowsByIds(store, kind = 'fact', ids = []) {
-  const normalizedIds = [...new Set(ids.map(id => Number(id)).filter(Number.isFinite))]
-  if (normalizedIds.length === 0) return 0
-  const placeholders = normalizedIds.map(() => '?').join(', ')
-  if (kind === 'fact') {
-    for (const id of normalizedIds) store.deleteFactFtsStmt.run(id)
-    store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'fact' AND entity_id IN (${placeholders})`).run(...normalizedIds)
-    if (store.vecEnabled) {
-      for (const id of normalizedIds) {
-        const rowid = store._vecRowId('fact', id)
-        try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
-      }
-    }
-    return Number(store.db.prepare(`DELETE FROM facts WHERE id IN (${placeholders})`).run(...normalizedIds).changes ?? 0)
-  }
-  if (kind === 'task') {
-    for (const id of normalizedIds) store.deleteTaskFtsStmt.run(id)
-    store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'task' AND entity_id IN (${placeholders})`).run(...normalizedIds)
-    if (store.vecEnabled) {
-      for (const id of normalizedIds) {
-        const rowid = store._vecRowId('task', id)
-        try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
-      }
-    }
-    store.db.prepare(`DELETE FROM task_events WHERE task_id IN (${placeholders})`).run(...normalizedIds)
-    return Number(store.db.prepare(`DELETE FROM tasks WHERE id IN (${placeholders})`).run(...normalizedIds).changes ?? 0)
-  }
-  if (kind === 'signal') {
-    for (const id of normalizedIds) store.deleteSignalFtsStmt.run(id)
-    store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'signal' AND entity_id IN (${placeholders})`).run(...normalizedIds)
-    if (store.vecEnabled) {
-      for (const id of normalizedIds) {
-        const rowid = store._vecRowId('signal', id)
-        try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
-      }
-    }
-    return Number(store.db.prepare(`DELETE FROM signals WHERE id IN (${placeholders})`).run(...normalizedIds).changes ?? 0)
-  }
+export function deleteRowsByIds(_store, _kind = 'fact', _ids = []) {
   return 0
 }
 
@@ -246,14 +142,9 @@ export function rebuildCandidates(store) {
 }
 
 export function resetConsolidatedMemory(store) {
-  store.clearFactsStmt.run()
-  store.clearTasksStmt.run()
-  store.clearSignalsStmt.run()
-  store.clearPropositionsStmt.run()
-  store.clearFactsFtsStmt.run()
-  store.clearTasksFtsStmt.run()
-  store.clearSignalsFtsStmt.run()
-  store.clearPropositionsFtsStmt.run()
+  store.clearClassificationsStmt.run()
+  store.clearClassificationsFtsStmt.run()
+  store.clearCandidatesStmt.run()
   store.clearVectorsStmt.run()
   if (store.vecEnabled) {
     try { store.db.exec('DELETE FROM vec_memory') } catch {}
@@ -275,74 +166,21 @@ export function resetConsolidatedMemoryForDays(store, dayKeys = []) {
   if (episodeIds.length > 0) {
     const episodePlaceholders = episodeIds.map(() => '?').join(', ')
 
-    const factIds = store.db.prepare(`
-      SELECT id FROM facts WHERE source_episode_id IN (${episodePlaceholders})
+    const classificationIds = store.db.prepare(`
+      SELECT id FROM classifications WHERE episode_id IN (${episodePlaceholders})
     `).all(...episodeIds).map(row => Number(row.id)).filter(Number.isFinite)
-    if (factIds.length > 0) {
-      const factPlaceholders = factIds.map(() => '?').join(', ')
-      for (const id of factIds) store.deleteFactFtsStmt.run(id)
-      store.db.prepare(`DELETE FROM facts WHERE id IN (${factPlaceholders})`).run(...factIds)
-      store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'fact' AND entity_id IN (${factPlaceholders})`).run(...factIds)
+    if (classificationIds.length > 0) {
+      const clsPlaceholders = classificationIds.map(() => '?').join(', ')
+      for (const id of classificationIds) store.deleteClassificationFtsStmt.run(id)
+      store.db.prepare(`DELETE FROM classifications WHERE id IN (${clsPlaceholders})`).run(...classificationIds)
+      store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'classification' AND entity_id IN (${clsPlaceholders})`).run(...classificationIds)
       if (store.vecEnabled) {
-        for (const id of factIds) {
-          const rowid = store._vecRowId('fact', id)
+        for (const id of classificationIds) {
+          const rowid = store._vecRowId('classification', id)
           try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
         }
       }
     }
-
-    const taskIds = store.db.prepare(`
-      SELECT id FROM tasks WHERE source_episode_id IN (${episodePlaceholders})
-    `).all(...episodeIds).map(row => Number(row.id)).filter(Number.isFinite)
-    if (taskIds.length > 0) {
-      const taskPlaceholders = taskIds.map(() => '?').join(', ')
-      for (const id of taskIds) store.deleteTaskFtsStmt.run(id)
-      store.db.prepare(`DELETE FROM tasks WHERE id IN (${taskPlaceholders})`).run(...taskIds)
-      store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'task' AND entity_id IN (${taskPlaceholders})`).run(...taskIds)
-      if (store.vecEnabled) {
-        for (const id of taskIds) {
-          const rowid = store._vecRowId('task', id)
-          try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
-        }
-      }
-    }
-
-    const signalIds = store.db.prepare(`
-      SELECT id FROM signals WHERE source_episode_id IN (${episodePlaceholders})
-    `).all(...episodeIds).map(row => Number(row.id)).filter(Number.isFinite)
-    if (signalIds.length > 0) {
-      const signalPlaceholders = signalIds.map(() => '?').join(', ')
-      for (const id of signalIds) store.deleteSignalFtsStmt.run(id)
-      store.db.prepare(`DELETE FROM signals WHERE id IN (${signalPlaceholders})`).run(...signalIds)
-      store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'signal' AND entity_id IN (${signalPlaceholders})`).run(...signalIds)
-      if (store.vecEnabled) {
-        for (const id of signalIds) {
-          const rowid = store._vecRowId('signal', id)
-          try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
-        }
-      }
-    }
-
-    const propositionIds = store.db.prepare(`
-      SELECT id FROM propositions WHERE source_episode_id IN (${episodePlaceholders})
-    `).all(...episodeIds).map(row => Number(row.id)).filter(Number.isFinite)
-    if (propositionIds.length > 0) {
-      const propositionPlaceholders = propositionIds.map(() => '?').join(', ')
-      for (const id of propositionIds) store.deletePropositionFtsStmt.run(id)
-      store.db.prepare(`DELETE FROM propositions WHERE id IN (${propositionPlaceholders})`).run(...propositionIds)
-      store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'proposition' AND entity_id IN (${propositionPlaceholders})`).run(...propositionIds)
-      if (store.vecEnabled) {
-        for (const id of propositionIds) {
-          const rowid = store._vecRowId('proposition', id)
-          try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
-        }
-      }
-    }
-
-    // Clean up orphaned entity_links, entities, and relations
-    store.db.prepare(`DELETE FROM entity_links WHERE episode_id IN (${episodePlaceholders})`).run(...episodeIds)
-    store.db.prepare(`DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM entity_links)`).run()
-    store.db.prepare(`DELETE FROM relations WHERE source_entity_id NOT IN (SELECT id FROM entities) OR target_entity_id NOT IN (SELECT id FROM entities)`).run()
   }
 
   store.db.prepare(`
@@ -366,92 +204,23 @@ export function pruneConsolidatedMemoryOutsideDays(store, dayKeys = []) {
   if (keepEpisodeIds.length === 0) return
   const keepPlaceholders = keepEpisodeIds.map(() => '?').join(', ')
 
-  const staleFactIds = store.db.prepare(`
-    SELECT id FROM facts
-    WHERE source_episode_id IS NOT NULL
-      AND source_episode_id NOT IN (${keepPlaceholders})
-  `).all(...keepEpisodeIds).map(row => Number(row.id)).filter(Number.isFinite)
-  if (staleFactIds.length > 0) {
-    const staleFactPlaceholders = staleFactIds.map(() => '?').join(', ')
-    for (const id of staleFactIds) store.deleteFactFtsStmt.run(id)
-    store.db.prepare(`DELETE FROM facts WHERE id IN (${staleFactPlaceholders})`).run(...staleFactIds)
-    store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'fact' AND entity_id IN (${staleFactPlaceholders})`).run(...staleFactIds)
-    if (store.vecEnabled) {
-      for (const id of staleFactIds) {
-        const rowid = store._vecRowId('fact', id)
-        try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
-      }
-    }
-  }
-
-  const staleTaskIds = store.db.prepare(`
-    SELECT id FROM tasks
-    WHERE source_episode_id IS NOT NULL
-      AND source_episode_id NOT IN (${keepPlaceholders})
-  `).all(...keepEpisodeIds).map(row => Number(row.id)).filter(Number.isFinite)
-  if (staleTaskIds.length > 0) {
-    const staleTaskPlaceholders = staleTaskIds.map(() => '?').join(', ')
-    for (const id of staleTaskIds) store.deleteTaskFtsStmt.run(id)
-    store.db.prepare(`DELETE FROM tasks WHERE id IN (${staleTaskPlaceholders})`).run(...staleTaskIds)
-    store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'task' AND entity_id IN (${staleTaskPlaceholders})`).run(...staleTaskIds)
-    if (store.vecEnabled) {
-      for (const id of staleTaskIds) {
-        const rowid = store._vecRowId('task', id)
-        try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
-      }
-    }
-  }
-
-  const staleSignalIds = store.db.prepare(`
-    SELECT id FROM signals
-    WHERE source_episode_id IS NOT NULL
-      AND source_episode_id NOT IN (${keepPlaceholders})
-  `).all(...keepEpisodeIds).map(row => Number(row.id)).filter(Number.isFinite)
-  if (staleSignalIds.length > 0) {
-    const staleSignalPlaceholders = staleSignalIds.map(() => '?').join(', ')
-    for (const id of staleSignalIds) store.deleteSignalFtsStmt.run(id)
-    store.db.prepare(`DELETE FROM signals WHERE id IN (${staleSignalPlaceholders})`).run(...staleSignalIds)
-    store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'signal' AND entity_id IN (${staleSignalPlaceholders})`).run(...staleSignalIds)
-    if (store.vecEnabled) {
-      for (const id of staleSignalIds) {
-        const rowid = store._vecRowId('signal', id)
-        try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
-      }
-    }
-  }
-
-  const stalePropositionIds = store.db.prepare(`
-    SELECT id FROM propositions
-    WHERE source_episode_id IS NOT NULL
-      AND source_episode_id NOT IN (${keepPlaceholders})
-  `).all(...keepEpisodeIds).map(row => Number(row.id)).filter(Number.isFinite)
-  if (stalePropositionIds.length > 0) {
-    const stalePropositionPlaceholders = stalePropositionIds.map(() => '?').join(', ')
-    for (const id of stalePropositionIds) store.deletePropositionFtsStmt.run(id)
-    store.db.prepare(`DELETE FROM propositions WHERE id IN (${stalePropositionPlaceholders})`).run(...stalePropositionIds)
-    store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'proposition' AND entity_id IN (${stalePropositionPlaceholders})`).run(...stalePropositionIds)
-    if (store.vecEnabled) {
-      for (const id of stalePropositionIds) {
-        const rowid = store._vecRowId('proposition', id)
-        try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
-      }
-    }
-  }
-
-  // Clean up orphaned entity_links, entities, and relations
-  store.db.prepare(`
-    DELETE FROM entity_links
+  const staleClassificationIds = store.db.prepare(`
+    SELECT id FROM classifications
     WHERE episode_id IS NOT NULL
       AND episode_id NOT IN (${keepPlaceholders})
-  `).run(...keepEpisodeIds)
-  store.db.prepare(`DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM entity_links)`).run()
-  store.db.prepare(`DELETE FROM relations WHERE source_entity_id NOT IN (SELECT id FROM entities) OR target_entity_id NOT IN (SELECT id FROM entities)`).run()
-
-  store.db.prepare(`
-    DELETE FROM profiles
-    WHERE source_episode_id IS NOT NULL
-      AND source_episode_id NOT IN (${keepPlaceholders})
-  `).run(...keepEpisodeIds)
+  `).all(...keepEpisodeIds).map(row => Number(row.id)).filter(Number.isFinite)
+  if (staleClassificationIds.length > 0) {
+    const stalePlaceholders = staleClassificationIds.map(() => '?').join(', ')
+    for (const id of staleClassificationIds) store.deleteClassificationFtsStmt.run(id)
+    store.db.prepare(`DELETE FROM classifications WHERE id IN (${stalePlaceholders})`).run(...staleClassificationIds)
+    store.db.prepare(`DELETE FROM memory_vectors WHERE entity_type = 'classification' AND entity_id IN (${stalePlaceholders})`).run(...staleClassificationIds)
+    if (store.vecEnabled) {
+      for (const id of staleClassificationIds) {
+        const rowid = store._vecRowId('classification', id)
+        try { store.db.exec(`DELETE FROM vec_memory WHERE rowid = ${rowid}`) } catch {}
+      }
+    }
+  }
 }
 
 export function markCandidateIdsConsolidated(store, candidateIds = []) {

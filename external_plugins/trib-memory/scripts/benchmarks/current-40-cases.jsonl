@@ -1,0 +1,40 @@
+{"label":"모델 속도 비교","query":"모델 속도 비교","expected_any":["모델 속도 비교","모델 조합","gpt-5.3-codex-spark medium, gpt-5.4-mini medium, g"]}
+{"label":"유저 노출 여부","query":"유저 노출 여부","expected_any":["유저 노출 여부","Discord 표시","아니 유저가보는거말이야 discord뭐이렇게나오는거"]}
+{"label":"LoCoMo 사이트 확인","query":"LoCoMo 사이트 확인","expected_any":["LoCoMo 사이트 확인","LoCoMo","LoCoMo 는 뭐하는사이트인겨 나도 측정할수있는거야 ?"]}
+{"label":"독립 세션 테스트","query":"독립 세션 테스트","expected_any":["독립 세션 테스트","독립세션","근데 독립세션에서 하나띄워서 테스트하는게낫지않냐 티먹스같은걸로"]}
+{"label":"확인 요청","query":"확인 요청","expected_any":["확인 요청","확인"]}
+{"label":"cycle1 추출 간격","query":"cycle1 추출 간격","expected_any":["cycle1 추출 간격","10분 interval","cycle1: 실시간 추출 (10분 interval) 도 실제 디폴트값을 변경가능하잖아"]}
+{"label":"리뷰어 추가 및 검증","query":"리뷰어 추가 및 검증","expected_any":["리뷰어 추가 및 검증","두 프로젝트","일단 리뷰어 이제 붙혀서 두개프로젝트 각각 검증"]}
+{"label":"컨텍스트 관리","query":"컨텍스트 관리","expected_any":["컨텍스트 관리","컨텍스트","저거 저런식으로 한번씩쓰면 컨텍스트는어떻게관리되는거야"]}
+{"label":"Codex 테스트 적용","query":"Codex 테스트 적용","expected_any":["Codex 테스트 적용","Codex","일단 저거 테스트를 codex넣어볼까"]}
+{"label":"접근 정책 요약","query":"접근 정책 요약","expected_any":["접근 정책 요약","access 설정","trib-channels Status\nDisplay the current state of "]}
+{"label":"워커 종료 금지 규칙 추가","query":"워커 종료 금지 규칙 추가","expected_any":["워커 종료 금지 규칙 추가","워커 종료","진행 그리고 워커는 내가 승인하기전까지 종료시키지마 유휴이후에 다시작업할수있으니 이내용을 "]}
+{"label":"세션 재설정 기준","query":"세션 재설정 기준","expected_any":["세션 재설정 기준","마지막 세션","그리고 마지막뜬 세션기준으로 세션다시잡는걸로 생각했는데"]}
+{"label":"함수 파라미터 설계","query":"함수 파라미터 설계","expected_any":["함수 파라미터 설계","함수 파라미터","일단 너가 함수 파라메터하고 어떻게들어가는지 한번보여줘봐 제일효율적으로쓰게"]}
+{"label":"인스트럭션 무시 원인","query":"인스트럭션 무시 원인","expected_any":["인스트럭션 무시 원인","인스트럭션","왜 무시가된거지 인스트럭션이 ㅕㅇ확하지않나"]}
+{"label":"커밋과 푸시 시점","query":"커밋과 푸시 시점","expected_any":["커밋과 푸시 시점","커밋 푸시","커밋 푸쉬는 미리하지말고. 이어서진행할할거하고"]}
+{"label":"메모리 갱신주기","query":"메모리 갱신주기","expected_any":["메모리 갱신주기","갱신주기","저게 정석이야? 그 갱신주기는 보통 몇턴으로잡아?"]}
+{"label":"Notion MCP 연동 조사","query":"Notion MCP 연동 조사","expected_any":["Notion MCP 연동 조사","Notion MCP와 API 또는 CLI","아노션mcp보는게어때 연동해서api나 cli있으면 제일연동성좋은걸로 웹에서찾아서"]}
+{"label":"MCP 도구 호출 노출","query":"MCP 도구 호출 노출","expected_any":["MCP 도구 호출 노출","MCP 호출","저게 보여.. mcp도구호출에서 유저가"]}
+{"label":"문서 정리 방향 검토","query":"문서 정리 방향 검토","expected_any":["문서 정리 방향 검토","Google Workspace 문서","구글워크스페이스는 연동되어있어 뭔가 그 문서한번에보기쉽고 서로정리하고 십고 ai 핸들링쉽게"]}
+{"label":"벤치마크 실행","query":"벤치마크 실행","expected_any":["벤치마크 실행","3사이클","추가는해두고 그 벤치함돌려볼수있나 3사이클까지다돌리고"]}
+{"label":"프로필과 문서 역할 중복","query":"프로필과 문서 역할 중복","expected_any":["프로필과 문서 역할 중복","Profile Identity/documents","Profile Identity ← documents → 제거 (학습으로 대체) 이거가좀 겹"]}
+{"label":"활성 세션 수","query":"활성 세션 수","expected_any":["활성 세션 수","메인/에이전트","왜 활성두개야 메인하고 지금떠있는에이전트?"]}
+{"label":"병합 리스크","query":"병합 리스크","expected_any":["병합 리스크","Supersedes 패턴","Supersedes 패턴 + Merge 연산 리스크는?"]}
+{"label":"임시 임베딩 모델","query":"임시 임베딩 모델","expected_any":["임시 임베딩 모델","text-embedding-3-small","text-embedding-3-small 임시로쓸수있나"]}
+{"label":"DB 구조 변경 영향","query":"DB 구조 변경 영향","expected_any":["DB 구조 변경 영향","DB 참조","지금저거 db구조바뀌면서 날리는거지? db참조로 ?"]}
+{"label":"candidates 상한 설정","query":"candidates 상한 설정","expected_any":["candidates 상한 설정","minCandidates","minCandidates: 50라기보단 max아이야? 최대이정도쌓이면무조건턴다"]}
+{"label":"데일리 주입 특성","query":"데일리 주입 특성","expected_any":["데일리 주입 특성","데일리","데일리도 어차피 한번만그렇고 그다음부터는 다르지"]}
+{"label":"컨텍스트 구성 로직","query":"컨텍스트 구성 로직","expected_any":["컨텍스트 구성 로직","context 구성 로직","context 구성 로직어떻게되지 ?"]}
+{"label":"최종 आउट풋 생성 방식","query":"최종 आउट풋 생성 방식","expected_any":["최종 आउट풋 생성 방식","최종아웃풋 생성","더우려되는거나 좀챙겼음하는거 최종아웃풋 생성이 좀 어떻게할지고민되기는하네 생성방식"]}
+{"label":"전처리 성능 비용","query":"전처리 성능 비용","expected_any":["전처리 성능 비용","전처리 속도","어그게 얼마나속도를해치지않으면서전처리가되는지가궁금한거지"]}
+{"label":"데일리와 대화기록 검색","query":"데일리와 대화기록 검색","expected_any":["데일리와 대화기록 검색","대화기록","아니면 데일리도 애매하면 그냥 대화기록통으로 검색이낫다는거?"]}
+{"label":"디스코드 승인 버튼 반응 문제","query":"디스코드 승인 버튼 반응 문제","expected_any":["디스코드 승인 버튼 반응 문제","승인 버튼","그리고 디스코드에서 승인버튼을 눌러도 터미널에서 반응이없고 터미널에서 닫아도 갱신이되지않아"]}
+{"label":"시크릿 키","query":"시크릿 키","expected_any":["시크릿 키","API 키","sk-proj-RDNmeNVEDYtpw181OyEMPiqPsKYUN1GyMl3RB8dL4M"]}
+{"label":"메모리 검색 기능","query":"메모리 검색 기능","expected_any":["메모리 검색 기능","벡터 유사도","그리고 애매하면 해당 백터유사도를 가지는 최근 몇일짜리 에피소드를 뒤진다던지 이런 필요한기"]}
+{"label":"md 내용 재명시 요청","query":"md 내용 재명시 요청","expected_any":["md 내용 재명시 요청","md 명시","이거 명화갛게 md한번더 명시해줄수있을까?"]}
+{"label":"리뷰어 팀 재사용","query":"리뷰어 팀 재사용","expected_any":["리뷰어 팀 재사용","reviewer team","리뷰어도 팀생성해서 재활용하지왜"]}
+{"label":"에피소드 ID 기반 사실 검증","query":"에피소드 ID 기반 사실 검증","expected_any":["에피소드 ID 기반 사실 검증","에피소드 ID","아그럼 에피소드 id를 통해 팩트를 체크한다고 ?"]}
+{"label":"기억 축적 계층 분배 전략","query":"기억 축적 계층 분배 전략","expected_any":["기억 축적 계층 분배 전략","단기/중기/장기 축적","근데 단기 축적 중기 축적 장기 축적을 적당히 나눠서 수행해야지 실시간흐름이 안끊기는건사실"]}
+{"label":"시간대 프로필 주입","query":"시간대 프로필 주입","expected_any":["시간대 프로필 주입","아시아 서울","아시아 서울이라노 나가는거 굳이 의미없지않냐 이건 프로필에 주입되도록하면되는거아님 ?"]}
+{"label":"파라미터 복수 허용 여부","query":"파라미터 복수 허용 여부","expected_any":["파라미터 복수 허용 여부","파라미터","아니 유저는복수일수는없지만 그파라메터에복수로들어갈가능성있나"]}

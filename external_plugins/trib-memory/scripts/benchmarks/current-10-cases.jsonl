@@ -1,0 +1,10 @@
+{"label":"디스코드 승인 버튼","query":"디스코드 승인","expected_any":["승인 버튼","디스코드에서 승인버튼","승인 동기"]}
+{"label":"메모리 검색 기능","query":"메모리 검색 방식","expected_any":["벡터 유사도","메모리 검색","mcp에 요청"]}
+{"label":"사이클 실행 조건","query":"사이클2 언제 실행되나","expected_any":["사이클2","하루단위","자동실행","특정량"]}
+{"label":"Git 사용자 설정","query":"깃 유저 tribgames","expected_any":["dev@tribgames.com","깃유저","Git 사용자 전환"]}
+{"label":"프로필 처리 방식","query":"프로필 어떻게 처리해","expected_any":["프로필","봇만 따로","유저 학습"]}
+{"label":"대화 히스토리 힌트","query":"히스토리 힌트","expected_any":["대화 히스토리","힌트"]}
+{"label":"토큰 절약","query":"토큰 절약 전략","expected_any":["토큰 절약","한 번 조회","토큰소모"]}
+{"label":"DB 구조 변경","query":"DB 구조 변경 영향","expected_any":["db구조","DB 참조","DB 구조 변경"]}
+{"label":"벤치마크 실행","query":"벤치마크 돌려봐","expected_any":["벤치","3사이클","돌리고"]}
+{"label":"인스트럭션 무시","query":"인스트럭션 무시된 이유","expected_any":["인스트럭션","무시"]}

@@ -14,7 +14,6 @@ import {
 } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { homedir } from 'os'
-import { createHash } from 'crypto'
 import { embedText, getEmbeddingModelId, getEmbeddingDims, warmupEmbeddingProvider, configureEmbedding, consumeProviderSwitchEvent } from './embedding-provider.mjs'
 import { cleanMemoryText } from './memory-extraction.mjs'
 import {
@@ -228,10 +227,6 @@ export class MemoryStore {
     this._loadVecExtension()
     this._openReadDb()
     this.init()
-    this.backfillCanonicalKeys()
-    if (this.needsDerivedIndexRebuild()) {
-      this.rebuildDerivedIndexes()
-    }
     this.syncEmbeddingMetadata()
   }
 
@@ -308,21 +303,9 @@ export class MemoryStore {
     const preservedEpisodes = Number(this.countEpisodes() ?? 0)
     this.db.exec(`
       DELETE FROM memory_candidates;
-      DELETE FROM facts;
-      DELETE FROM task_events;
-      DELETE FROM tasks;
-      DELETE FROM signals;
-      DELETE FROM profiles;
-      DELETE FROM interests;
-      DELETE FROM propositions;
-      DELETE FROM relations;
-      DELETE FROM entity_links;
-      DELETE FROM entities;
+      DELETE FROM classifications;
+      DELETE FROM classifications_fts;
       DELETE FROM documents;
-      DELETE FROM facts_fts;
-      DELETE FROM tasks_fts;
-      DELETE FROM signals_fts;
-      DELETE FROM propositions_fts;
       DELETE FROM memory_vectors;
       DELETE FROM pending_embeds;
       DELETE FROM memory_meta;
@@ -678,10 +661,6 @@ export class MemoryStore {
     })
   }
 
-  backfillCanonicalKeys() {
-    return
-  }
-
   /**
    * Retrieve a stored vector from memory_vectors, or compute and store it.
    * @param {string} entityType - 'fact', 'task', 'signal', 'episode'
@@ -707,14 +686,6 @@ export class MemoryStore {
       this.noteVectorWrite(activeModel, vector.length)
     }
     return vector
-  }
-
-  rebuildDerivedIndexes() {
-    return
-  }
-
-  needsDerivedIndexRebuild() {
-    return false
   }
 
   appendEpisode(entry) {
@@ -973,7 +944,13 @@ export class MemoryStore {
   upsertDocument(kind, docKey, content) {
     const clean = cleanMemoryText(content)
     if (!clean) return
-    this.upsertDocumentStmt.run(kind, docKey, clean)
+    this.db.prepare(`
+      INSERT INTO documents (kind, doc_key, content, updated_at)
+      VALUES (?, ?, ?, unixepoch())
+      ON CONFLICT(kind, doc_key) DO UPDATE SET
+        content = excluded.content,
+        updated_at = unixepoch()
+    `).run(kind, docKey, clean)
   }
 
   upsertClassifications(rows = [], seenAt = null, sourceEpisodeId = null) {
@@ -1475,14 +1452,6 @@ export class MemoryStore {
       .sort((a, b) => Number(b.seedRank) - Number(a.seedRank))
   }
 
-  searchRelevant(query, limit = 8) {
-    const clean = cleanMemoryText(query)
-    if (!clean) return []
-    const results = this.combineRetrievalResults(clean, this.searchRelevantSparse(clean, limit * 2), [], limit)
-    this.recordRetrieval(results)
-    return results
-  }
-
   async searchRelevantHybrid(query, limit = 8, options = {}) {
     const clean = cleanMemoryText(query)
     if (!clean) return []
@@ -1492,34 +1461,53 @@ export class MemoryStore {
     const sparse = this.searchRelevantSparse(clean, limit * 3)
     const dense = await this.searchRelevantDense(clean, limit * 3, queryVector, null, {})
 
-    // Merge sparse + dense, dedupe by entity_id
+    // Merge via RRF (Reciprocal Rank Fusion) — scale-independent
+    // RRF score = 1/(k+rank_sparse) + 1/(k+rank_dense), k=60
+    const K = 60
+    const sparseRanks = new Map()
+    const denseRanks = new Map()
+    sparse.forEach((item, i) => {
+      const key = `${item.type}:${item.entity_id}`
+      if (!sparseRanks.has(key)) sparseRanks.set(key, i + 1)
+    })
+    dense.forEach((item, i) => {
+      const key = `${item.type}:${item.entity_id}`
+      if (!denseRanks.has(key)) denseRanks.set(key, i + 1)
+    })
+
     const seen = new Map()
     for (const item of [...sparse, ...dense]) {
       const key = `${item.type}:${item.entity_id}`
-      if (!seen.has(key)) {
-        seen.set(key, { ...item, keyword_score: 0, embedding_score: 0 })
+      if (seen.has(key)) {
+        // dense 항목이 vector_json을 갖고 있으면 보존
+        if (item.vector_json && !seen.get(key).vector_json) {
+          seen.get(key).vector_json = item.vector_json
+        }
+        continue
       }
-      const merged = seen.get(key)
-      if (sparse.includes(item)) merged.keyword_score = Math.max(merged.keyword_score, Number(item.score ?? item.fts_score ?? 0.3))
-      if (dense.includes(item)) merged.embedding_score = Math.max(merged.embedding_score, Number(item.dense_score ?? item.score ?? 0.3))
+      const sparseRank = sparseRanks.get(key)
+      const denseRank = denseRanks.get(key)
+      const rrfSparse = sparseRank ? 1 / (K + sparseRank) : 0
+      const rrfDense = denseRank ? 1 / (K + denseRank) : 0
+      const baseScore = rrfSparse + rrfDense
+      seen.set(key, { ...item, keyword_score: rrfSparse, embedding_score: rrfDense, base_score: baseScore })
     }
 
     // ── Stage 2: apply scoring per RETRIEVAL-CLASSIFICATION-PLAN ──
     const { computeFinalScore, getScoringConfig } = await import('./memory-score-utils.mjs')
-    const tuning = options.tuning ?? this.getRetrievalTuning()
-    const scoringConfig = getScoringConfig(tuning)
+    const scoringConfig = getScoringConfig(options.tuning ?? this.getRetrievalTuning())
 
     const scored = []
     for (const [, item] of seen) {
-      const baseScore = item.keyword_score + item.embedding_score
-      const finalScore = computeFinalScore(baseScore, item, clean, { config: scoringConfig })
-      scored.push({ ...item, weighted_score: finalScore, base_score: baseScore })
+      const finalScore = computeFinalScore(item.base_score, item, clean, { config: scoringConfig, queryVector })
+      scored.push({ ...item, weighted_score: finalScore })
     }
 
     scored.sort((a, b) => b.weighted_score - a.weighted_score)
 
     // ── Stage 3: rerank (optional) ──
     let finalResults = scored.slice(0, limit)
+    const tuning = options.tuning ?? this.getRetrievalTuning()
     if (tuning.reranker?.enabled) {
       try {
         const { crossEncoderRerank } = await import('./reranker.mjs')
@@ -1597,8 +1585,9 @@ export class MemoryStore {
       } catch (error) { logIgnoredError('searchRelevantSparse episodes fts', error) }
     }
 
-    // LIKE fallback for 2-char Korean tokens that trigram can't index
-    if (shortTokens.length > 0 && results.length < limit) {
+    // LIKE supplement for 2-char Korean tokens that trigram can't index
+    // Always run when short tokens exist — FTS misses these entirely
+    if (shortTokens.length > 0) {
       const seen = new Set(results.map(r => `${r.type}:${r.entity_id}`))
       try {
         const likeClassifications = this.db.prepare(`
@@ -1767,143 +1756,6 @@ export class MemoryStore {
       }
     } catch {}
     return null
-  }
-
-  combineRetrievalResults(query, sparseResults, denseResults, limit = 8, intent = null, _queryEntities = [], options = {}) {
-    const now = Date.now()
-    const merged = new Map()
-    const queryTokens = new Set(tokenizeMemoryText(query))
-    const queryTokenCount = queryTokens.size
-    const tuning = options.tuning ?? this.getRetrievalTuning()
-    const primaryIntent = intent?.primary ?? 'decision'
-    const effectiveIntent = options.graphFirst ? 'graph' : primaryIntent
-    const includeDoneTasks = isDoneTaskQuery(query)
-
-    const dedupKey = (item) => {
-      const entityId = Number(item?.entity_id ?? 0)
-      if (entityId > 0) {
-        const status = String(item?.status ?? '')
-        const workstream = String(item?.workstream ?? '')
-        return `${item.type}:${item.subtype}:${entityId}:${status}:${workstream}`
-      }
-      const normalized = cleanMemoryText(String(item.content ?? '')).toLowerCase()
-      const contentHash = createHash('sha1').update(normalized.slice(0, 240)).digest('hex').slice(0, 16)
-      return `${item.type}:${item.subtype}:${contentHash}`
-    }
-
-    for (const item of sparseResults) {
-      const key = dedupKey(item)
-      merged.set(key, {
-        ...item,
-        sparse_score: Number(item.score),
-        dense_score: null,
-      })
-    }
-
-    for (const item of denseResults) {
-      const key = dedupKey(item)
-      const prev = merged.get(key)
-      if (prev) {
-        prev.dense_score = Number(item.score)
-      } else {
-        merged.set(key, {
-          ...item,
-          sparse_score: null,
-          dense_score: Number(item.score),
-        })
-      }
-    }
-
-    // --- Stage 2: Relevance (how related is this item to the query?) ---
-    function computeRelevanceScore(item, contentTokens) {
-      // 1. Dense similarity (vector similarity) — strongest signal
-      const denseSim = item.dense_score != null ? Math.abs(Number(item.dense_score)) : 0
-
-      // 2. Lexical overlap (token overlap)
-      const overlapCount = contentTokens.reduce((count, token) => count + (queryTokens.has(token) ? 1 : 0), 0)
-      const overlapRatio = queryTokenCount > 0 ? overlapCount / queryTokenCount : 0
-
-      // 3. Sparse score (FTS BM25) — normalize to 0-1 range
-      const sparseSig = item.sparse_score != null ? Math.min(1, Math.abs(Number(item.sparse_score)) / 10) : 0
-
-      return { relevance: denseSim * 0.50 + overlapRatio * 0.35 + sparseSig * 0.15, overlapCount }
-    }
-
-    // --- Stage 3: Quality (how trustworthy/useful is this item?) ---
-    function computeQualityScore(item) {
-      // 1. Confidence (LLM extraction confidence)
-      const confidence = Number(item.quality_score ?? item.confidence ?? 0.5)
-
-      // 2. Recency (newer = better, 15-day half-life)
-      const ageSeconds = item.updated_at ? Math.max(0, now / 1000 - Number(item.updated_at)) : 0
-      const ageDays = ageSeconds / 86400
-      const recency = Math.exp(-ageDays / 15)
-
-      // 3. Retrieval count (frequently retrieved = useful)
-      const popularity = Math.min(1, Number(item.retrieval_count ?? 0) / 10)
-
-      return confidence * 0.60 + recency * 0.30 + popularity * 0.10
-    }
-
-    const RELEVANCE_WEIGHT = 0.75
-    const QUALITY_WEIGHT = 0.25
-
-    const scored = [...merged.values()]
-      .map(item => {
-        const contentTokens = tokenizeMemoryText(`${item.subtype ?? ''} ${item.content}`)
-        const { relevance, overlapCount } = computeRelevanceScore(item, contentTokens)
-        const quality = computeQualityScore(item)
-        const weighted_score = -(relevance * RELEVANCE_WEIGHT + quality * QUALITY_WEIGHT)
-        return {
-          ...item,
-          content: compactRetrievalContent(item),
-          overlapCount,
-          relevance,
-          quality,
-          weighted_score,
-        }
-      })
-
-    const ranked = collapseClaimSurfaceDuplicates(scored, 'weighted_score')
-      .sort((a, b) => Number(a.weighted_score) - Number(b.weighted_score))
-
-    const hasCoreResult = ranked.some(item => item.type === 'classification')
-    const conciseQuery = queryTokenCount <= 4
-    const hasTaskCandidate = false
-    const typeCaps = getIntentTypeCaps(effectiveIntent, { hasTaskCandidate, hasCoreResult, conciseQuery })
-    const typeCounts = new Map()
-    const selected = []
-    const sliceSize = Math.max(limit * 4, 20)
-    const sliced = ranked.slice(0, sliceSize)
-    const rerankInput = [...sliced]
-    const rerankPool = collapseClaimSurfaceDuplicates(rerankInput, 'rerank_score')
-      .map(item => ({
-        ...item,
-        rerank_score: Number(item.weighted_score) + getIntentSubtypeBonus(effectiveIntent, item),
-      }))
-      .filter(item => shouldKeepRerankItem(effectiveIntent, item, { hasTaskCandidate }))
-      .map(item => ({
-        ...item,
-        second_stage_score: computeSecondStageRerankScore(effectiveIntent, item, {
-          includeDoneTasks,
-          graphFirst: Boolean(options.graphFirst),
-          isHistoryExact: Boolean(parseTemporalHint(query)?.exact) && (primaryIntent === 'history' || primaryIntent === 'event'),
-          exactDate: parseTemporalHint(query)?.start ?? '',
-          query,
-        }),
-      }))
-      .sort((a, b) => Number(a.second_stage_score) - Number(b.second_stage_score))
-
-    for (const item of rerankPool) {
-      const type = String(item.type)
-      const cap = typeCaps.get(type) ?? 2
-      const count = typeCounts.get(type) ?? 0
-      if (count >= cap) continue
-      selected.push(item)
-      typeCounts.set(type, count + 1)
-      if (selected.length >= limit) break
-    }
-    return selected
   }
 
   recordRetrieval(results = []) {

@@ -89,7 +89,6 @@ const limit = Math.max(1, Number(args.limit ?? 5))
 const hitK = Math.max(1, Number(args.top_k ?? 3))
 const benchmark = await runBenchmarkCases(store, cases, { limit, topK: hitK })
 const { summary, cases: caseOutputs } = benchmark
-const stages = ['candidates', 'combined', 'exact', 'verified', 'final']
 
 const format = String(args.format ?? 'compact').toLowerCase()
 if (format === 'json') {
@@ -108,21 +107,18 @@ lines.push(`cases=${cases.length} top_k=${hitK}`)
 lines.push(`source=${sourceDataDir}`)
 lines.push(`data=${dataDir}`)
 lines.push('')
-for (const stage of stages) {
-  const metrics = summary[stage]
-  lines.push(`${stage.padEnd(10)} hit@1=${formatPercent(metrics.hit_at_1, cases.length)} hit@${hitK}=${formatPercent(metrics.hit_at_k, cases.length)} mrr=${formatMetric(metrics.mrr)}`)
-}
+lines.push(`hit@1=${formatPercent(summary.hit_at_1, 1)} hit@${hitK}=${formatPercent(summary.hit_at_k, 1)} mrr=${formatMetric(summary.mrr)} matched=${summary.matched}/${summary.total}`)
 
 const showMisses = Number(args.show_misses ?? 5)
 if (showMisses > 0) {
-  const misses = caseOutputs.filter(item => item.ranks.final == null).slice(0, showMisses)
+  const misses = caseOutputs.filter(item => item.rank == null).slice(0, showMisses)
   if (misses.length > 0) {
     lines.push('')
-    lines.push(`final misses (${misses.length})`)
+    lines.push(`misses (${misses.length})`)
     for (const miss of misses) {
       lines.push(`- ${miss.label}`)
       lines.push(`  expected_any=${miss.expected_any.join(' | ') || '-'} expected_all=${miss.expected_all.join(' | ') || '-'}`)
-      const top = miss.top.final.map(item => summarizeItem(item)).join(' || ') || '(empty)'
+      const top = (miss.top ?? []).map(item => summarizeItem(item)).join(' || ') || '(empty)'
       lines.push(`  top=${top}`)
     }
   }

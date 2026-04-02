@@ -86,21 +86,19 @@ export async function runBenchmarkCases(store, cases, options = {}) {
   const topK = Math.max(1, Number(options.topK ?? 3))
   const includeCases = options.includeCases !== false
   const includeTop = options.includeTop !== false
-  const stages = ['candidates', 'combined', 'exact', 'verified', 'final']
-  const totals = Object.fromEntries(stages.map(stage => [stage, { hit1: 0, hitK: 0, mrr: 0, matched: 0 }]))
+  const totals = { hit1: 0, hitK: 0, mrr: 0, matched: 0 }
   const caseOutputs = []
 
   for (const testCase of cases) {
     const { trStart, trEnd } = parseTimerange(testCase.timerange)
     const temporal = buildTemporalOverride(trStart, trEnd)
-    const hybrid = await store.searchRelevantHybrid(testCase.query, limit * 2, {
-      debug: false,
-      returnStageResults: true,
+    const results = await store.searchRelevantHybrid(testCase.query, limit * 2, {
       temporal,
       filters: testCase.filters,
       recordRetrieval: false,
     })
-    const stageResults = hybrid?.stage_results ?? {}
+    const items = Array.isArray(results) ? results : (results?.results ?? [])
+    const rank = findFirstMatchRank(items, testCase)
     const caseSummary = {
       id: testCase.id,
       label: testCase.label,
@@ -108,40 +106,29 @@ export async function runBenchmarkCases(store, cases, options = {}) {
       timerange: testCase.timerange,
       expected_any: testCase.expected_any,
       expected_all: testCase.expected_all,
-      ranks: {},
-      ...(includeTop ? { top: {} } : {}),
+      rank,
+      ...(includeTop ? { top: items.slice(0, topK) } : {}),
     }
 
-    for (const stage of stages) {
-      const items = Array.isArray(stageResults[stage]) ? stageResults[stage] : []
-      const rank = findFirstMatchRank(items, testCase)
-      caseSummary.ranks[stage] = rank
-      if (includeTop) caseSummary.top[stage] = items.slice(0, topK)
-      if (rank != null) {
-        totals[stage].matched += 1
-        totals[stage].mrr += 1 / rank
-        if (rank === 1) totals[stage].hit1 += 1
-        if (rank <= topK) totals[stage].hitK += 1
-      }
+    if (rank != null) {
+      totals.matched += 1
+      totals.mrr += 1 / rank
+      if (rank === 1) totals.hit1 += 1
+      if (rank <= topK) totals.hitK += 1
     }
 
     if (includeCases) caseOutputs.push(caseSummary)
   }
 
-  const summary = {}
-  for (const stage of stages) {
-    summary[stage] = {
-      hit_at_1: totals[stage].hit1 / cases.length,
-      hit_at_k: totals[stage].hitK / cases.length,
-      mrr: totals[stage].mrr / cases.length,
-      matched: totals[stage].matched,
-      total: cases.length,
-    }
-  }
-
   return {
     top_k: topK,
     cases: includeCases ? caseOutputs : [],
-    summary,
+    summary: {
+      hit_at_1: totals.hit1 / cases.length,
+      hit_at_k: totals.hitK / cases.length,
+      mrr: totals.mrr / cases.length,
+      matched: totals.matched,
+      total: cases.length,
+    },
   }
 }
