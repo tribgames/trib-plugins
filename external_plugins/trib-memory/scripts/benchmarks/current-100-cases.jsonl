@@ -1,0 +1,100 @@
+{"label":"Claude.md 작업 방식 정리","query":"Claude.md 작업 방식 정리","expected_any":["Claude.md 작업 방식 정리","워커 조사 후 이어작업","클로드md 좀수정중인데 워커에게 조사까지 맡기고 이어서작업시키큰게 컨텍스트 효율이 좋을것같"]}
+{"label":"consolidation 전 기억 갱신","query":"consolidation 전 기억 갱신","expected_any":["consolidation 전 기억 갱신","기억갱신","consolidation전에는 기억갱신이안되나?"]}
+{"label":"MCP 검증 문제","query":"MCP 검증 문제","expected_any":["MCP 검증 문제","리팩토링 버그 검증","최종인데말이지 문제는 지금 mcp쪽작업에서막힌건지 아예검증이안돌고 리펙토링단게에서버그검증이"]}
+{"label":"객관적 재확인","query":"객관적 재확인","expected_any":["객관적 재확인","확인","높음: trib-memory/external_plugins/trib-memory/lib/m"]}
+{"label":"최근 MD와 기획서 확인","query":"최근 MD와 기획서 확인","expected_any":["최근 MD와 기획서 확인","codex 저장소 문서","지금 메모리쪽대규모리펙토링했거든? codex저장소최근md보고 기획서확인해봐"]}
+{"label":"승인 모드 전환 문제","query":"승인 모드 전환 문제","expected_any":["승인 모드 전환 문제","승인 모드","내가 일단승인ㅇ느했는데 승인모드로바뀌어버렸거든? 컨피그 바뀐게있나 아니면 에이전트돌면서 뭔"]}
+{"label":"구조 단순화와 확장","query":"구조 단순화와 확장","expected_any":["구조 단순화와 확장","정리 방향","처음부터정리해가결론은 심플하게 정리하고 확장한다느개념이고다만 기획했던것처럼은 정리되어있음해"]}
+{"label":"함수 파라미터 설계","query":"함수 파라미터 설계","expected_any":["함수 파라미터 설계","함수 파라미터","일단 너가 함수 파라메터하고 어떻게들어가는지 한번보여줘봐 제일효율적으로쓰게"]}
+{"label":"다단계 탐색","query":"다단계 탐색","expected_any":["다단계 탐색","깊이 탐색","타고타고타고 애매하면 더깊이들어가는게필요한가"]}
+{"label":"사전 정제 출력","query":"사전 정제 출력","expected_any":["사전 정제 출력","출력 정제","그 아까 레타모델에서 쓴다는게 그거아닌가 뽑아줄때 미리좋게 뽑아주는거"]}
+{"label":"원본 파일 식별","query":"원본 파일 식별","expected_any":["원본 파일 식별","원본 파일","어떤파일이 원본인지넣는거는 안해보통?"]}
+{"label":"md 내용 재명시 요청","query":"md 내용 재명시 요청","expected_any":["md 내용 재명시 요청","md 명시","이거 명화갛게 md한번더 명시해줄수있을까?"]}
+{"label":"기록 위치","query":"기록 위치","expected_any":["기록 위치","루트 클로드 MD","아니 루트의 클로드 MD에 기록하라는거였는데 흠 .."]}
+{"label":"LoCoMo 사이트 확인","query":"LoCoMo 사이트 확인","expected_any":["LoCoMo 사이트 확인","LoCoMo","LoCoMo 는 뭐하는사이트인겨 나도 측정할수있는거야 ?"]}
+{"label":"CLI 및 문서 주입 환경 비교","query":"CLI 및 문서 주입 환경 비교","expected_any":["CLI 및 문서 주입 환경 비교","문서 주입","제미나이 도마찬가지야 cli 셋다 쓰는데 이거 센드박스로 md나 다른 문서주입안되는환경에서"]}
+{"label":"예외 동작 확인","query":"예외 동작 확인","expected_any":["예외 동작 확인","메시지 처리 예외","아니야 오늘까지되던거라 예외로묻는걸확인해봐야할것같아 메세지를 올때"]}
+{"label":"중요 문서 확인","query":"중요 문서 확인","expected_any":["중요 문서 확인","문서","확인해봐 중요해보이는문서들 보이는거빼고든 거의 허허벌판이ㅏ"]}
+{"label":"프로필과 히스토리 구성 조사","query":"프로필과 히스토리 구성 조사","expected_any":["프로필과 히스토리 구성 조사","히스토리","봇은 md기반 유저 원하는것을합쳐서, user는 유저 학습기반으로 만들어진것 History"]}
+{"label":"기본 정리 요청","query":"기본 정리 요청","expected_any":["기본 정리 요청","정리"]}
+{"label":"언어 값 재현 문제","query":"언어 값 재현 문제","expected_any":["언어 값 재현 문제","language row 값","주요 발견\n높음: trib-memory/external_plugins/trib-memory"]}
+{"label":"채널 인식 문제","query":"채널 인식 문제","expected_any":["채널 인식 문제","채널모드","체널모드로 들어왔는데 왜 체널인식이안되지"]}
+{"label":"RAG 현황","query":"RAG 현황","expected_any":["RAG 현황","RAG","그래서 요즘 rag가 죽네마네 하고있는거야?"]}
+{"label":"Focus 부스트 파라미터","query":"Focus 부스트 파라미터","expected_any":["Focus 부스트 파라미터","Focus max 0.14 boost 8회","Focus max 0.14 boost 8회 embedding/검색 (~400ms) 제거 가"]}
+{"label":"DB 구조 변경 영향","query":"DB 구조 변경 영향","expected_any":["DB 구조 변경 영향","DB 참조","지금저거 db구조바뀌면서 날리는거지? db참조로 ?"]}
+{"label":"데일리 유용성","query":"데일리 유용성","expected_any":["데일리 유용성","데일리","아데일리가 실제로 도움이되고있었던거야 ?"]}
+{"label":"반응과 감탄","query":"반응과 감탄","expected_any":["반응과 감탄","칭찬/반응","오우.. 구라아니냐 내가그렇게 대단하다고?"]}
+{"label":"md 작성 규칙 정리","query":"md 작성 규칙 정리","expected_any":["md 작성 규칙 정리","Claude.md와 영어 작성 규칙","그리고 유저 요청에 md 수정할때는 클로드.md를사용 md 작성은 항상 영어로 이내용들 다"]}
+{"label":"확인 요청","query":"확인 요청","expected_any":["확인 요청","확인"]}
+{"label":"순차 채움 규칙","query":"순차 채움 규칙","expected_any":["순차 채움 규칙","번호 순서","1이 비어있음 1부터 1채워지면 2 2채워지명 3"]}
+{"label":"논문 존재 여부 확인","query":"논문 존재 여부 확인","expected_any":["논문 존재 여부 확인","논문","실화냐 이게 진짜논문이있어? 그것도최신?"]}
+{"label":"문서 정리 방향 검토","query":"문서 정리 방향 검토","expected_any":["문서 정리 방향 검토","Google Workspace 문서","구글워크스페이스는 연동되어있어 뭔가 그 문서한번에보기쉽고 서로정리하고 십고 ai 핸들링쉽게"]}
+{"label":"추가 시그널 학습","query":"추가 시그널 학습","expected_any":["추가 시그널 학습","시그널","그리고 거기에 + 시그널로 학습해서 추가 어디셔널하는게어떨까"]}
+{"label":"구조 타당성 점검","query":"구조 타당성 점검","expected_any":["구조 타당성 점검","구조","지금 너가보기에 꽤괜찮은 구조라는거지 지금문제만해결하면 ?"]}
+{"label":"설계 변경 일관성","query":"설계 변경 일관성","expected_any":["설계 변경 일관성","변경 기준","근데그것도한번말바꿨다고 훅훅바꾸면안되지않냐"]}
+{"label":"레타 개념 확인","query":"레타 개념 확인","expected_any":["레타 개념 확인","레타","OpenClaw 맞아정확하게 레타는 뭐지"]}
+{"label":"에피소드 필드 설계","query":"에피소드 필드 설계","expected_any":["에피소드 필드 설계","유저네임 필드","에피소드에유저네임필드는없어도되지 이건개인거라서"]}
+{"label":"접근 정책 요약","query":"접근 정책 요약","expected_any":["접근 정책 요약","access 정책","trib-channels Status\nDisplay the current state of "]}
+{"label":"전처리2와 LLM","query":"전처리2와 LLM","expected_any":["전처리2와 LLM","전처리2","근데 전처리2가 llm들어가는거아님 ?"]}
+{"label":"수정본 재전달 요청","query":"수정본 재전달 요청","expected_any":["수정본 재전달 요청","수정본"]}
+{"label":"Thinking 수준과 Codex","query":"Thinking 수준과 Codex","expected_any":["Thinking 수준과 Codex","Thinking 수준","어띵킹은 어차피 로우정도로주입하면되니그건중요한건아니고 흠흠 그 코덱스는"]}
+{"label":"작업 분담 규칙","query":"작업 분담 규칙","expected_any":["작업 분담 규칙","1스탭 작업","매우간단한 1스탭짜리 작업에 한해서는 리드도 직접작업가능하다 클로드 .MD 에 메모리"]}
+{"label":"consolidation 개념","query":"consolidation 개념","expected_any":["consolidation 개념","consolidation","consolidation 정확한개념이뭐지 ?"]}
+{"label":"레타와 자사 구조 비교","query":"레타와 자사 구조 비교","expected_any":["레타와 자사 구조 비교","레타/RAG","지금 레타쪽이랑우리랑 차이는뭐야 rag자체도"]}
+{"label":"전처리 성능 비용","query":"전처리 성능 비용","expected_any":["전처리 성능 비용","전처리 속도","어그게 얼마나속도를해치지않으면서전처리가되는지가궁금한거지"]}
+{"label":"모델 속도 비교","query":"모델 속도 비교","expected_any":["모델 속도 비교","모델 조합","gpt-5.3-codex-spark medium, gpt-5.4-mini medium, g"]}
+{"label":"구조 단순화","query":"구조 단순화","expected_any":["구조 단순화","정리 상태","완전히 심플하게 정리했거든? 근데 마크다운문서를찾아봤음하는데 기호기서써놓으라고했거든"]}
+{"label":"에피소드와 원문 범위","query":"에피소드와 원문 범위","expected_any":["에피소드와 원문 범위","에피소드","에피소드가 원문이라고? 전체가다들어가 ?"]}
+{"label":"고속 검색 도구 구현","query":"고속 검색 도구 구현","expected_any":["고속 검색 도구 구현","Recall 검색도구","리콜 고속 검색도구 우리가 만들어줄수있나 MCP로 ?"]}
+{"label":"유사도 기준 병합","query":"유사도 기준 병합","expected_any":["유사도 기준 병합","유사도","그리고 유사도가 이미 비슷한것들만 판단하고 합치는거지?"]}
+{"label":"평가 프로토콜 필요성","query":"평가 프로토콜 필요성","expected_any":["평가 프로토콜 필요성","Kumiho Assessment Protocol","Kumiho Assessment Protocol를할필요없잖아 이전거만으로충분하지않냐"]}
+{"label":"초기 텍스트 필터링","query":"초기 텍스트 필터링","expected_any":["초기 텍스트 필터링","텍스트 전처리","처음에 우리가 그한번 텍스트 걸러주는쪽에서해주면되는거아님 ?"]}
+{"label":"테스트 배포와 다운로드","query":"테스트 배포와 다운로드","expected_any":["테스트 배포와 다운로드","테스트","나중에 성과괜찮으면 아까그테스트누구나내려받아서할수있다고했지 ?"]}
+{"label":"하이브리드 검색 효율성","query":"하이브리드 검색 효율성","expected_any":["하이브리드 검색 효율성","하이브리드 검색","하이브리드 검색 (Dense+Sparse+Temporal+Seed+Focus) 이것도 효율"]}
+{"label":"Git 사용자 전환 기록","query":"Git 사용자 전환 기록","expected_any":["Git 사용자 전환 기록","dev@tribgames.com","엥 깃유저 dev@tribgames.com만써야해스위칭해서 이건 기록해놔 클로드md에"]}
+{"label":"노션 정리 개선","query":"노션 정리 개선","expected_any":["노션 정리 개선","Notion 정리","노션 정리가 뭔가안이쁘냐"]}
+{"label":"belief 기록과 비동기 교정","query":"belief 기록과 비동기 교정","expected_any":["belief 기록과 비동기 교정","실시간 belief 기록","실시간 belief 기록 + 비동기 교정 이건정확히뭐냐"]}
+{"label":"context.md 정의 확인","query":"context.md 정의 확인","expected_any":["context.md 정의 확인","context.md","context.md가뭔지는알아 ?"]}
+{"label":"메인 세션 기준","query":"메인 세션 기준","expected_any":["메인 세션 기준","메인세션","메인세션기준으로 ( 비대화형 / 백그라운드 / 팀에이전트 서브에이전트제외)"]}
+{"label":"토큰 절약 전략","query":"토큰 절약 전략","expected_any":["토큰 절약 전략","한 번 조회","너가 전체를 다읽을필요없이 딱 한번에나오면 토큰소모가제일줄잖아"]}
+{"label":"판단 근거 제시","query":"판단 근거 제시","expected_any":["판단 근거 제시","유사/반대","그럼 유사와 반대이런걸 같이보여주는건 판단근거를 ?"]}
+{"label":"cycle2 교정","query":"cycle2 교정","expected_any":["cycle2 교정","cycle2","cycle2 교정는 협의끝나고진행해."]}
+{"label":"평가 주기","query":"평가 주기","expected_any":["평가 주기","주간 점수 조정","한달이라기보다는 점차가맞지않니 ? 주마다돌려서 점수조정같을걸해야하나"]}
+{"label":"메모리 갱신주기","query":"메모리 갱신주기","expected_any":["메모리 갱신주기","갱신주기","저게 정석이야? 그 갱신주기는 보통 몇턴으로잡아?"]}
+{"label":"모델 보유 언급","query":"모델 보유 언급","expected_any":["모델 보유 언급","GPT 5.4 xhigh","나에겐 노는 gpt 5.4 xhigh가있다!"]}
+{"label":"인덱싱 흐름 정리","query":"인덱싱 흐름 정리","expected_any":["인덱싱 흐름 정리","reindex required와 dense","계속 진행했고, 현재 기준점은 이렇습니다.\nextended 20케이스 기준으로 지금 수치는"]}
+{"label":"권한 승인 알림 문제","query":"권한 승인 알림 문제","expected_any":["권한 승인 알림 문제","permission prompt","트리비채널 권한승인퍼미션이계속온다"]}
+{"label":"병합 리스크","query":"병합 리스크","expected_any":["병합 리스크","Supersedes 패턴","Supersedes 패턴 + Merge 연산 리스크는?"]}
+{"label":"봇 사용자 태그 확인","query":"봇 사용자 태그 확인","expected_any":["봇 사용자 태그 확인","bot user tag","trib-channels Doctor\nRun diagnostic checks and rep"]}
+{"label":"프로필 생성 방식","query":"프로필 생성 방식","expected_any":["프로필 생성 방식","프로필","프로필도 그냥 유저에게 학습해서 넣자고한거아니었나 봇만 따로 처리하고"]}
+{"label":"대화 시작 방식","query":"대화 시작 방식","expected_any":["대화 시작 방식","대화 스타일","있어야되네 먼저 우리는 대화를거는 스타일이라"]}
+{"label":"터미널 노출 방지","query":"터미널 노출 방지","expected_any":["터미널 노출 방지","메모리 출력","저 메모리 저거 터미널노출만안되게는못하나"]}
+{"label":"JSON 포맷 예시 추가","query":"JSON 포맷 예시 추가","expected_any":["JSON 포맷 예시 추가","JSON 포맷","실제 게이머스크롤ai 스크롤가서 차라리 json포맷이면 예시를 주는게낫지않을까"]}
+{"label":"cycle2 자동 실행 조건","query":"cycle2 자동 실행 조건","expected_any":["cycle2 자동 실행 조건","사이클2","엥 우리 사이클2는 하루단위 무조건 혹은특정한 양이쌓였을때 자동아님?"]}
+{"label":"도구와 데이터 제공 방식","query":"도구와 데이터 제공 방식","expected_any":["도구와 데이터 제공 방식","도구와 데이터","우린 확실한도구를주는거고 데이터하고?"]}
+{"label":"두 항목 정리 방안","query":"두 항목 정리 방안","expected_any":["두 항목 정리 방안","두 개 항목","흠 두개는 정리만하자어떻게할까"]}
+{"label":"사이클2/3 검증","query":"사이클2/3 검증","expected_any":["사이클2/3 검증","사이클2/3","팩트가문제가되는건가 사이클2,3도돌려봐야지"]}
+{"label":"Discord 인젝션 표시","query":"Discord 인젝션 표시","expected_any":["Discord 인젝션 표시","인젝션 섹션","discord인젝션이 섹션에 주입되는게 보이더라고"]}
+{"label":"전처리와 후처리 구조","query":"전처리와 후처리 구조","expected_any":["전처리와 후처리 구조","전처리기","근데 전처리기와 후처리기가있는거아녀 ? 어 다듬어봐"]}
+{"label":"관련 대화 일괄 반환","query":"관련 대화 일괄 반환","expected_any":["관련 대화 일괄 반환","관련 대화","그리고 에피소드관련쿼리날리면 한번에 관련대화를 다주는그럼거 기능으로넣어주면좋아할라나"]}
+{"label":"출력 형식과 태그","query":"출력 형식과 태그","expected_any":["출력 형식과 태그","plain text bullet","plain text bullet 남기는건뭐 그냥 태그만남는다는거 ?"]}
+{"label":"재현 절차","query":"재현 절차","expected_any":["재현 절차","language=한국어","현재 기준으로 다시 확인해보니, 지난번 핵심 이슈들이 아직 남아 있습니다.\n높음: trib"]}
+{"label":"커밋과 푸시 시점","query":"커밋과 푸시 시점","expected_any":["커밋과 푸시 시점","커밋 푸시","커밋 푸쉬는 미리하지말고. 이어서진행할할거하고"]}
+{"label":"config 문서화","query":"config 문서화","expected_any":["config 문서화","컨피그","그리고 컨피그는 주석좀써줘야하나 전체적으로 파라메터하고"]}
+{"label":"힌트 기반 장기데이터 발췌","query":"힌트 기반 장기데이터 발췌","expected_any":["힌트 기반 장기데이터 발췌","힌트/장기 데이터","힌트를 기반으로 우리가 실제 원래 데이터를 장기로 모아논것을 발췌해서 넘기는건?"]}
+{"label":"모델 세팅 방법","query":"모델 세팅 방법","expected_any":["모델 세팅 방법","프로바이더","저기 모델은 어떻게넣게 세팅해줄수있나 우린 -p도 넣고, api도넣을수있고, 로컬도넣을수있"]}
+{"label":"fastmode 파라미터","query":"fastmode 파라미터","expected_any":["fastmode 파라미터","fastmode","그리고 fastmode: 빈파라메터로 넣어야하는데 흠"]}
+{"label":"히스토리 혼합 로직","query":"히스토리 혼합 로직","expected_any":["히스토리 혼합 로직","히스토리 로직","근데 그럼히스토리쪽을 좀더 로직을 정교화해서 믹스애햐하는거아닌겨?"]}
+{"label":"consolidation 발생 빈도","query":"consolidation 발생 빈도","expected_any":["consolidation 발생 빈도","일일 발생량","저게근데 하루에 왜 그렇게많이일어나 ?"]}
+{"label":"관련 대화 제공과 청킹","query":"관련 대화 제공과 청킹","expected_any":["관련 대화 제공과 청킹","청킹","그리고 + -가아니라 우리가 관련대화를 줄수는없어? 관련대화인지 청킹해줄수없나"]}
+{"label":"하드웨어 사양 가능 여부","query":"하드웨어 사양 가능 여부","expected_any":["하드웨어 사양 가능 여부","M4/M5 메모리","m4 16기가네 m5 32기가사면돌리냐"]}
+{"label":"인스트럭션 무시 원인","query":"인스트럭션 무시 원인","expected_any":["인스트럭션 무시 원인","인스트럭션","왜 무시가된거지 인스트럭션이 ㅕㅇ확하지않나"]}
+{"label":"채널 연결 불안정","query":"채널 연결 불안정","expected_any":["채널 연결 불안정","channel mode 연결","체널모드연결이 불안정해 특히 서로간의입출력이 불안정하고, 디스코드 유저에게 표기되는 타이핑"]}
+{"label":"전체 로직 재검증","query":"전체 로직 재검증","expected_any":["전체 로직 재검증","리팩토링","그것도아니고 지금 완전리펙토링했어첨으부터너가 에이전트없이 다시확인해전체로직"]}
+{"label":"승인창 동작 확인","query":"승인창 동작 확인","expected_any":["승인창 동작 확인","승인 버튼","지금도승인창하나 갔는데 안눌린다 이거체크좀"]}
+{"label":"메모리 파라미터","query":"메모리 파라미터","expected_any":["메모리 파라미터","두번째 파라미터","어 그리고 메모리 두번째파라메터는 기간이냐? 그건너가 봤을때 제일도움되는걸로"]}
+{"label":"수신 인식 불안정","query":"수신 인식 불안정","expected_any":["수신 인식 불안정","수신 인식","어라 지금또되네 너가 수신하는것도 이제온다 뭔가 지금 제대로 인식이안될때가만흔데뭐지"]}
+{"label":"임베딩 모델 비교","query":"임베딩 모델 비교","expected_any":["임베딩 모델 비교","Qwen3-Embedding-8B","Qwen3-Embedding-8B? 지금우리가 쓰는거랑달라 ?"]}
+{"label":"파라미터 복수 허용 여부","query":"파라미터 복수 허용 여부","expected_any":["파라미터 복수 허용 여부","파라미터","아니 유저는복수일수는없지만 그파라메터에복수로들어갈가능성있나"]}
+{"label":"세션 시작 인스트럭션","query":"세션 시작 인스트럭션","expected_any":["세션 시작 인스트럭션","시간 정보","아그리고 mcp인스트럭션에일부가 세션스타트로들어가야되겠는데? 시간이랑"]}
+{"label":"데일리 요약과 원문 연결","query":"데일리 요약과 원문 연결","expected_any":["데일리 요약과 원문 연결","데일리 원문","근데이거 그럼 그런거야 요약이긴한데 빠지는게없는게 데일리고, 그데일리 원문이랑도 연결시켜주"]}
