@@ -586,7 +586,7 @@ export class MemoryStore {
     `)
     this.listDenseClassificationRowsStmt = this.db.prepare(`
       SELECT 'classification' AS type, c.classification AS subtype, c.id AS entity_id,
-             trim(c.element || ' | ' || c.topic || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
+             trim(c.element || ' | ' || c.topic || CASE WHEN c.importance IS NOT NULL AND c.importance != '' THEN ' | ' || c.importance ELSE '' END || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
              c.updated_at AS updated_at, c.retrieval_count AS retrieval_count,
              c.confidence AS quality_score, c.importance AS importance,
              e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend, mv.vector_json AS vector_json
@@ -1081,7 +1081,7 @@ export class MemoryStore {
       ORDER BY updated_at DESC
     `).all()
 
-    const promoted = allClassifications.filter(row => getTagFactor(row.importance) < 1.0)
+    const promoted = allClassifications.filter(row => getTagFactor(row.importance) <= 0.2)
 
     if (promoted.length > 0) {
       const lines = promoted.map(row => {
@@ -1149,7 +1149,7 @@ export class MemoryStore {
     const items = []
 
     const classificationRows = this.db.prepare(`
-      SELECT id, classification, topic, element, state
+      SELECT id, classification, topic, element, importance, state
       FROM classifications
       WHERE status = 'active'
       ORDER BY updated_at DESC, id DESC
@@ -1161,7 +1161,7 @@ export class MemoryStore {
         entityType: 'classification',
         entityId: row.id,
         subtype: row.classification,
-        content: [row.element, row.topic, row.state].filter(Boolean).join(' | '),
+        content: [row.element, row.topic, row.importance, row.state].filter(Boolean).join(' | '),
       })
     }
 
@@ -1579,7 +1579,7 @@ export class MemoryStore {
       try {
       const classificationHits = this.db.prepare(`
         SELECT 'classification' AS type, c.classification AS subtype, CAST(c.id AS TEXT) AS ref,
-               trim(c.element || ' | ' || c.topic || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
+               trim(c.element || ' | ' || c.topic || CASE WHEN c.importance IS NOT NULL AND c.importance != '' THEN ' | ' || c.importance ELSE '' END || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
                bm25(classifications_fts) AS score, c.updated_at AS updated_at, c.id AS entity_id,
                c.confidence AS quality_score, c.importance AS importance, c.retrieval_count AS retrieval_count,
                e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend
@@ -1633,7 +1633,7 @@ export class MemoryStore {
       try {
         const likeClassifications = this.db.prepare(`
           SELECT 'classification' AS type, c.classification AS subtype, CAST(c.id AS TEXT) AS ref,
-                 trim(c.element || ' | ' || c.topic || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
+                 trim(c.element || ' | ' || c.topic || CASE WHEN c.importance IS NOT NULL AND c.importance != '' THEN ' | ' || c.importance ELSE '' END || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
                  0 AS score, c.updated_at AS updated_at, c.id AS entity_id,
                  c.confidence AS quality_score, c.importance AS importance, c.retrieval_count AS retrieval_count,
                  e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend
@@ -1771,7 +1771,7 @@ export class MemoryStore {
       if (entityType === 'classification') {
         return this.db.prepare(`
           SELECT 'classification' AS type, c.classification AS subtype, c.id AS entity_id,
-                 trim(c.element || ' | ' || c.topic || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
+                 trim(c.element || ' | ' || c.topic || CASE WHEN c.importance IS NOT NULL AND c.importance != '' THEN ' | ' || c.importance ELSE '' END || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
                  c.updated_at AS updated_at, c.retrieval_count AS retrieval_count,
                  c.confidence AS quality_score, c.importance AS importance,
                  e.source_ref AS source_ref, e.ts AS source_ts,
