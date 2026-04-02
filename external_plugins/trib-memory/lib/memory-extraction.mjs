@@ -34,6 +34,7 @@ export function cleanMemoryText(text) {
     .replace(/^\s*Chunk ID: .*$/gm, '')
     .replace(/^\s*tool_uses: .*$/gm, '')
     .replace(/^\s*menu item .*$/gm, '')
+    .replace(/<\/?[a-z][-a-z]*(?:\s[^>]*)?\/?>/gi, '')
     .replace(/[\u{1F300}-\u{1FAD6}\u{2600}-\u{27BF}]/gu, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{2,}/g, '\n')
