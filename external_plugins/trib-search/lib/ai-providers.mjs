@@ -1,7 +1,13 @@
-import fs from 'fs'
 import path from 'path'
 import { spawn } from 'child_process'
 import { CLI_HOME_DIR, ensureDir } from './config.mjs'
+import { hasAiCliWorker, runAiCliTask } from './ai-cli-worker-host.mjs'
+
+function requireWorker(label) {
+  if (!hasAiCliWorker()) {
+    throw new Error(`ai cli worker is not running — cannot execute ${label}`)
+  }
+}
 
 export const AI_PROVIDER_IDS = ['grok', 'gemini', 'claude', 'codex']
 
@@ -245,41 +251,14 @@ function isTrue(value) {
 }
 
 function runCli(command, args, env, timeoutMs, cwd = process.cwd()) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      cwd,
-    })
-
-    let stdout = ''
-    let stderr = ''
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM')
-      reject(new Error(`${command} timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
-
-    child.stdout.on('data', chunk => {
-      stdout += chunk.toString()
-    })
-    child.stderr.on('data', chunk => {
-      stderr += chunk.toString()
-    })
-    child.on('error', err => {
-      clearTimeout(timer)
-      reject(err)
-    })
-    child.on('exit', code => {
-      clearTimeout(timer)
-      if (code !== 0) {
-        reject(new Error(`${command} exited with ${code}: ${stderr.trim()}`))
-        return
-      }
-      resolve({
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-      })
-    })
+  requireWorker(command)
+  return runAiCliTask({
+    mode: 'spawn',
+    command,
+    args,
+    env,
+    cwd,
+    timeout: timeoutMs,
   })
 }
 
@@ -288,40 +267,12 @@ function shellEscape(value) {
 }
 
 function runShellCli(commandText, env, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('/bin/zsh', ['-lc', commandText], {
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-
-    let stdout = ''
-    let stderr = ''
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM')
-      reject(new Error(`shell command timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
-
-    child.stdout.on('data', chunk => {
-      stdout += chunk.toString()
-    })
-    child.stderr.on('data', chunk => {
-      stderr += chunk.toString()
-    })
-    child.on('error', err => {
-      clearTimeout(timer)
-      reject(err)
-    })
-    child.on('exit', code => {
-      clearTimeout(timer)
-      if (code !== 0) {
-        reject(new Error(`shell command exited with ${code}: ${stderr.trim()}`))
-        return
-      }
-      resolve({
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-      })
-    })
+  requireWorker('shell')
+  return runAiCliTask({
+    mode: 'shell',
+    commandText,
+    env,
+    timeout: timeoutMs,
   })
 }
 

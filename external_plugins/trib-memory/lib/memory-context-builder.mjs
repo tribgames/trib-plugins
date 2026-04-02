@@ -3,10 +3,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { embedText } from './embedding-provider.mjs'
 import { cleanMemoryText } from './memory-extraction.mjs'
-import { buildHintKey, formatHintTag, shouldInjectHint } from './memory-context-utils.mjs'
-import { decayConfidence, decaySignalScore } from './memory-decay-utils.mjs'
-import { detectProfileQuerySlot } from './memory-profile-utils.mjs'
-import { parseTemporalHint } from './memory-query-plan.mjs'
+import { buildHintKey, formatHintTag } from './memory-context-utils.mjs'
+import { readMemoryFeatureFlags } from './memory-ops-policy.mjs'
 import { looksLowSignalQuery, tokenizeMemoryText } from './memory-text-utils.mjs'
 
 function nextDateStr(value) {
@@ -14,6 +12,14 @@ function nextDateStr(value) {
   if (Number.isNaN(date.getTime())) return ''
   date.setDate(date.getDate() + 1)
   return date.toISOString().slice(0, 10)
+}
+
+function readContextBuilderConfig(store) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(store.dataDir, 'config.json'), 'utf8'))
+  } catch {
+    return {}
+  }
 }
 
 export async function buildInboundMemoryContext(store, query, options = {}) {
@@ -37,67 +43,23 @@ export async function buildInboundMemoryContext(store, query, options = {}) {
   const lines = []
   const seenHintKeys = new Set()
   const queryTokenCount = Math.max(1, tokenizeMemoryText(clean).length)
-  const profileSlot = detectProfileQuerySlot(clean)
+  const featureFlags = readMemoryFeatureFlags(readContextBuilderConfig(store))
   const queryVector = await measureStage('embed_query', () => embedText(clean))
   const focusVector = await measureStage('build_focus', () => store.buildRecentFocusVector({
     channelId: options.channelId,
     userId: options.userId,
   }))
   const intent = await measureStage('classify_intent', () => store.classifyQueryIntent(clean, queryVector, { tuning }))
-  const topTaskHint = store.db.prepare(`
-    SELECT workstream
-    FROM tasks
-    WHERE status IN ('active', 'in_progress', 'paused')
-      AND workstream IS NOT NULL
-      AND workstream != ''
-    ORDER BY CASE priority WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, retrieval_count DESC, last_seen DESC
-    LIMIT 1
-  `).get()?.workstream ?? ''
-
   const pushHint = (item, overrides = {}) => {
     const rawText = String(overrides.text ?? item.content ?? item.text ?? item.value ?? '').trim()
     if (!rawText) return
-    const hintType = String(overrides.type ?? item?.type ?? 'episode')
-    const hintSubtype = String(overrides.subtype ?? item?.subtype ?? item?.kind ?? '').trim()
-    const hintStage = String(overrides.stage ?? item?.stage ?? item?.status ?? '').toLowerCase()
-    const overlapCount = Number(item?.overlapCount ?? 0)
-    if (hintType === 'task' && intent.primary !== 'task') {
-      const isActiveStage = hintStage === 'implementing' || hintStage === 'wired' || hintStage === 'verified' || hintStage === 'in_progress' || hintStage === 'investigating'
-      if (!isActiveStage || overlapCount < 1) return
-    }
-    if (intent.primary === 'profile' && profileSlot) {
-      if (hintType === 'profile' && hintSubtype !== profileSlot) return
-      if (hintType === 'signal' && hintSubtype !== profileSlot && !(profileSlot === 'response_style' && hintSubtype === 'tone')) return
-    }
-    if (!shouldInjectHint(item, overrides, { queryTokenCount, hintConfig: tuning.hintInjection })) return
+    // weighted_score > 0 이면 관련 결과 (RETRIEVAL-CLASSIFICATION-PLAN scoring)
+    if (item.weighted_score != null && item.weighted_score <= 0) return
     const key = buildHintKey(item, overrides)
     if (!key) return
     if (seenHintKeys.has(key)) return
     seenHintKeys.add(key)
     lines.push(formatHintTag(item, overrides, { queryTokenCount, nowTs: totalStartedAt }))
-  }
-
-  const coreMemory = await measureStage('core_memory', () => store.getCoreMemoryItems(clean, intent, queryVector))
-  if (coreMemory.length > 0) {
-    for (const item of coreMemory) {
-      pushHint(item)
-    }
-  }
-
-  if (intent.primary === 'task') {
-    const priorityTasks = await measureStage('priority_tasks', () => store.getPriorityTasks(clean, {
-      channelId: options.channelId,
-      userId: options.userId,
-      focusVector,
-      workstreamHint: topTaskHint,
-      limit: 3,
-    }))
-    if (priorityTasks.length > 0) {
-      for (const task of priorityTasks) {
-        const detail = task.details ? ` — ${task.details}` : ''
-        pushHint(task, { type: 'task', text: `${task.title}${detail}` })
-      }
-    }
   }
 
   let relevant = await measureStage('hybrid_search', () => store.searchRelevantHybrid(clean, limit, {
@@ -109,113 +71,25 @@ export async function buildInboundMemoryContext(store, query, options = {}) {
     recordRetrieval: false,
     tuning,
   }))
-  if (intent.primary === 'profile') {
-    relevant = relevant.filter(item => item.type === 'fact' || item.type === 'signal')
-  }
-  relevant = relevant.slice(0, Math.max(3, limit - 1))
-
-  const hasFactInRelevant = relevant.some(item => item.type === 'fact')
-
-  if (!hasFactInRelevant && (intent.primary === 'decision' || intent.primary === 'policy' || intent.primary === 'security')) {
-    const queryTokens = new Set(tokenizeMemoryText(clean))
-    const decisions = store.db.prepare(`
-      SELECT fact_type AS type, 'fact' AS hintType, text AS content, confidence, last_seen
-      FROM facts
-      WHERE status = 'active'
-        AND fact_type IN ('decision', 'constraint')
-      ORDER BY confidence DESC, retrieval_count DESC, mention_count DESC, last_seen DESC
-      LIMIT 5
-    `).all()
-    const relevantDecisions = decisions.filter(d => {
-      const factTokens = tokenizeMemoryText(d.content)
-      return factTokens.some(t => queryTokens.has(t))
-    }).slice(0, 3)
-    for (const item of relevantDecisions) {
-      pushHint(item, { type: 'fact' })
-    }
-  }
+  relevant = relevant
+    .filter(item => item.type === 'classification' || item.type === 'episode')
+    .slice(0, Math.max(3, limit))
 
   if (relevant.length > 0) {
     for (const item of relevant) {
       pushHint(item)
     }
-
-    const hasSignal = intent.primary === 'profile' && relevant.some(item => item.type === 'signal')
-    if (hasSignal) {
-      const seenSignals = new Set(
-        relevant
-          .filter(item => item.type === 'signal')
-          .map(item => `${item.subtype}:${item.content}`),
-      )
-      const extraSignals = store.db.prepare(`
-        SELECT kind, value, score, last_seen
-        FROM signals
-        ORDER BY score DESC, retrieval_count DESC, last_seen DESC
-        LIMIT 3
-      `).all()
-        .map(item => ({
-          ...item,
-          effectiveScore: decaySignalScore(item.score, item.last_seen, item.kind),
-        }))
-        .filter(item => item.effectiveScore >= 0.45)
-        .filter(item => !seenSignals.has(`${item.kind}:${item.value}`))
-        .slice(0, 1)
-      for (const signal of extraSignals) {
-        pushHint(signal, { type: 'signal', confidence: signal.effectiveScore, text: signal.value })
-      }
-    }
   } else {
-    const facts = store.db.prepare(`
-      SELECT fact_type, text, confidence, last_seen
-      FROM facts
-      WHERE status = 'active'
-      ORDER BY
-        CASE fact_type
-          WHEN 'preference' THEN 1
-          WHEN 'constraint' THEN 2
-          WHEN 'decision' THEN 3
-          ELSE 4
-        END,
-        confidence DESC,
-        mention_count DESC,
-        last_seen DESC
-      LIMIT 4
-    `).all()
-    for (const fact of facts) {
-      const confidence = decayConfidence(fact.confidence, fact.last_seen)
-      if (confidence < 0.25) continue
-      pushHint(fact, { type: 'fact', confidence })
-    }
-
-    const tasks = store.db.prepare(`
-      SELECT title, status, confidence, last_seen, stage
-      FROM tasks
-      WHERE status IN ('active', 'in_progress', 'paused')
-      ORDER BY
-        CASE priority WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
-        last_seen DESC
-      LIMIT 3
-    `).all()
-    for (const task of tasks) {
-      const confidence = decayConfidence(task.confidence, task.last_seen)
-      if (confidence < 0.25) continue
-      pushHint(task, { type: 'task', text: task.title, confidence })
-    }
-
-    const signals = store.db.prepare(`
-      SELECT kind, value, score, last_seen
-      FROM signals
-      ORDER BY score DESC, last_seen DESC
-      LIMIT 3
-    `).all()
-    const activeSignals = signals
-      .map(item => ({
-        ...item,
-        effectiveScore: decaySignalScore(item.score, item.last_seen, item.kind),
-      }))
-      .filter(item => item.effectiveScore >= 0.45)
-    for (const signal of activeSignals) {
-      pushHint(signal, { type: 'signal', confidence: signal.effectiveScore, text: signal.value })
+    const fallbackClassifications = store.getClassificationRows(4).map(item => ({
+      type: 'classification',
+      subtype: item.classification,
+      content: [item.classification, item.topic, item.element, item.state].filter(Boolean).join(' | '),
+      confidence: item.confidence,
+      updated_at: item.updated_at,
+      entity_id: item.id,
+    }))
+    for (const item of fallbackClassifications) {
+      pushHint(item, { type: 'classification' })
     }
   }
 
@@ -266,7 +140,7 @@ export async function buildInboundMemoryContext(store, query, options = {}) {
         startDate = parsedTemporal.start
         endDate = nextDateStr(parsedTemporal.end ?? parsedTemporal.start)
       }
-      if (!startDate) {
+      if (!startDate && featureFlags.temporalParser) {
         try {
           const temporalPort = fs.readFileSync(path.join(os.tmpdir(), 'trib-memory', 'temporal-port'), 'utf8').trim()
           const res = await fetch(`http://localhost:${temporalPort}/temporal`, {

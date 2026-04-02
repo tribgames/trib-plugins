@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, appendFileSync } from 'fs'
 import { join, normalize, extname } from 'path'
 import { tmpdir } from 'os'
 import { DATA_DIR } from './config.js'
+import { runCliWorkerTask } from './cli-worker-host.js'
 
 const SCRIPTS_DIR = join(DATA_DIR, 'scripts')
 const NOPLUGIN_DIR = join(tmpdir(), 'trib-channels-noplugin')
@@ -120,38 +121,34 @@ export function ensureNopluginDir(): void {
   mkdirSync(NOPLUGIN_DIR, { recursive: true })
 }
 
-/** Spawn claude -p and return stdout via callback */
+/** Run claude -p via the CLI worker child process and return stdout via callback */
 export function spawnClaudeP(
   name: string,
   prompt: string,
   onResult: (result: string, code: number | null) => void,
 ): void {
   ensureNopluginDir()
-  logEvent(`${name}: spawning claude -p`)
-
-  const proc = spawn('claude', [
-    '-p', '--dangerously-skip-permissions', '--no-session-persistence',
-    '--plugin-dir', NOPLUGIN_DIR,
-  ], {
-    env: { ...process.env, TRIB_CHANNELS_NO_CONNECT: '1' },
-  })
+  logEvent(`${name}: dispatching to cli worker`)
 
   const wrappedPrompt = prompt + '\n\nIMPORTANT: Output your final result as plain text to stdout. Do NOT use any reply, messaging, or channel tools. Just print the result.'
-  proc.stdin.write(wrappedPrompt)
-  proc.stdin.end()
+  const args = [
+    '-p', '--dangerously-skip-permissions', '--no-session-persistence',
+    '--plugin-dir', NOPLUGIN_DIR,
+  ]
 
-  let stdout = ''
-  if (proc.stdout) proc.stdout.on('data', (d: Buffer) => { stdout += d })
-
-  proc.on('close', (code: number | null) => {
-    const lines = stdout.trim().split('\n')
-    const result = lines.slice(-30).join('\n').substring(0, 1900)
-    logEvent(`${name}: claude -p exited (${code})`)
-    onResult(result, code)
-  })
-
-  proc.on('error', (err: Error) => {
-    logEvent(`${name}: spawn error: ${err}`)
+  void runCliWorkerTask({
+    command: 'claude',
+    args,
+    stdin: wrappedPrompt,
+    timeout: 120000,
+    env: { ...process.env, TRIB_CHANNELS_NO_CONNECT: '1' },
+  }).then(result => {
+    const lines = result.stdout.trim().split('\n')
+    const text = lines.slice(-30).join('\n').substring(0, 1900)
+    logEvent(`${name}: cli worker completed (${result.code})`)
+    onResult(text, result.code)
+  }).catch((err: Error) => {
+    logEvent(`${name}: cli worker error: ${err.message}`)
     onResult('', null)
   })
 }

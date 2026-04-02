@@ -16,69 +16,29 @@ import { dirname, join, resolve } from 'path'
 import { homedir } from 'os'
 import { createHash } from 'crypto'
 import { embedText, getEmbeddingModelId, getEmbeddingDims, warmupEmbeddingProvider, configureEmbedding, consumeProviderSwitchEvent } from './embedding-provider.mjs'
-import {
-  cleanMemoryText,
-  composeTaskDetails,
-  isProfileRelatedText,
-  shouldKeepFact,
-  shouldKeepSignal,
-} from './memory-extraction.mjs'
+import { cleanMemoryText } from './memory-extraction.mjs'
 import {
   buildFtsQuery,
-  extractExplicitDate,
   firstTextContent,
   getShortTokensForLike,
   candidateScore,
   insertCandidateUnits,
   looksLowSignal,
-  propositionSubjectTokens,
   shortTokenMatchScore,
   tokenizeMemoryText,
-  extractKoCompoundTokens,
   generateQueryVariants,
   localNow,
   localDateStr,
 } from './memory-text-utils.mjs'
 import {
-  SCOPED_LANE_PRIOR,
-  isProfileIntent,
-  isPolicyIntent,
-  getIntentTypeCaps,
-  getIntentSubtypeBonus,
-  shouldKeepRerankItem,
-  computeSecondStageRerankScore,
-  compactRetrievalContent,
-  collapseClaimSurfaceDuplicates,
-} from './memory-ranking-utils.mjs'
-import {
-  buildMemoryQueryPlan,
-  isDoneTaskQuery,
-  isRelationQuery,
-  isRuleQuery,
+  isHistoryQuery,
   parseTemporalHint,
 } from './memory-query-plan.mjs'
-import {
-  detectArchitectureQuery,
-  detectOperationalIssueQuery,
-  detectStandaloneMemoryQuery,
-} from './memory-query-cues.mjs'
-import { buildCandidateRows } from './memory-candidate-utils.mjs'
-import {
-  applyExactHistorySelection,
-  buildHybridRetrievalInputs,
-  getSeedResultsForPlan,
-  summarizeRetrieverDebug,
-} from './memory-retrievers.mjs'
+import { detectOperationalIssueQuery, detectStandaloneMemoryQuery } from './memory-query-cues.mjs'
 import {
   applyMetadataFilters as applyMetadataFiltersImpl,
-  bulkVerifyHints as bulkVerifyHintsImpl,
-  getEntityRecallRows as getEntityRecallRowsImpl,
   getEpisodeRecallRows as getEpisodeRecallRowsImpl,
-  getPolicyRecallRows as getPolicyRecallRowsImpl,
-  getProfileRecallRows as getProfileRecallRowsImpl,
   getRecallShortcutRows as getRecallShortcutRowsImpl,
-  getRelationRecallRows as getRelationRecallRowsImpl,
-  verifyMemoryClaim as verifyMemoryClaimImpl,
 } from './memory-recall-store.mjs'
 import {
   countEpisodes as countEpisodesImpl,
@@ -102,15 +62,9 @@ import {
 } from './memory-maintenance-store.mjs'
 import { buildInboundMemoryContext as buildInboundMemoryContextImpl } from './memory-context-builder.mjs'
 import { DEFAULT_MEMORY_TUNING, mergeMemoryTuning } from './memory-tuning.mjs'
-import { detectDevQueryBias, inferTaskActivity, inferTaskScope } from './memory-dev-utils.mjs'
-import {
-  applyLexicalIntentHints,
-  detectProfileQuerySlot,
-  normalizeProfileKey,
-  profileKeyForFact,
-  profileKeyForSignal,
-  shouldKeepProfileValue,
-} from './memory-profile-utils.mjs'
+import { readMemoryFeatureFlags } from './memory-ops-policy.mjs'
+import { detectDevQueryBias } from './memory-dev-utils.mjs'
+import { applyLexicalIntentHints, detectProfileQuerySlot } from './memory-profile-utils.mjs'
 // memory-score-utils imports removed — scoring consolidated into 3-stage pipeline
 import {
   averageVectors,
@@ -245,157 +199,6 @@ function isTranscriptQuarantineContent(text) {
   return false
 }
 
-function staleCutoffDays(kind) {
-  switch (kind) {
-    case 'decision': return 180
-    case 'preference': return 120
-    case 'constraint': return 180
-    case 'fact': return 90
-    default: return 120
-  }
-}
-
-function decaySignalScore(score, lastSeen, kind = '') {
-  const base = Number(score ?? 0.5)
-  if (!lastSeen) return base
-  const ageDays = Math.max(0, (Date.now() - new Date(lastSeen).getTime()) / (1000 * 60 * 60 * 24))
-  const cutoff =
-    kind === 'language' || kind === 'tone' ? 180 :
-    kind === 'cadence' ? 120 :
-    90
-  const penalty = Math.min(0.45, ageDays / cutoff * 0.25)
-  return Math.max(0.15, Number((base - penalty).toFixed(3)))
-}
-
-function normalizeTaskStatus(status, details = '') {
-  const raw = String(status ?? '').trim().toLowerCase()
-  if (raw === 'done' || raw === 'completed' || raw === 'cancelled' || raw === 'paused' || raw === 'in_progress' || raw === 'active') {
-    if (raw === 'active' && /\b(done|completed|resolved|finished|merged|shipped)\b/.test(String(details).toLowerCase())) {
-      return 'done'
-    }
-    return raw === 'completed' ? 'done' : raw
-  }
-  const combined = `${raw} ${String(details).toLowerCase()}`
-  if (/\b(done|completed|resolved|finished|merged|shipped)\b/.test(combined)) return 'done'
-  if (/\b(cancelled|canceled|dropped|abandoned)\b/.test(combined)) return 'cancelled'
-  if (/\b(paused|blocked|waiting|hold)\b/.test(combined)) return 'paused'
-  if (/\b(in progress|progress|ongoing)\b/.test(combined)) return 'in_progress'
-  return 'active'
-}
-
-function normalizeFactSlot(slot) {
-  const value = String(slot ?? '').trim()
-  return value ? value : ''
-}
-
-function propositionKindForFact(factType, slot = '') {
-  const normalizedSlot = normalizeFactSlot(slot)
-  if (normalizedSlot) return normalizedSlot
-  return normalizeFactType(factType) || 'fact'
-}
-
-function normalizeWorkstream(value) {
-  const clean = String(value ?? '').trim().toLowerCase()
-  if (!clean) return ''
-  return clean
-    .replace(/[^\p{L}\p{N}]+/gu, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 48)
-}
-
-function canonicalKeyTokens(text, maxTokens = 8) {
-  return tokenizeMemoryText(text)
-    .filter(token => token.length >= 2)
-    .slice(0, Math.max(1, Number(maxTokens ?? 8)))
-}
-
-function deriveClaimKey(factType, slot = '', text = '', workstream = '') {
-  const normalizedType = normalizeFactType(factType)
-  const normalizedSlot = normalizeFactSlot(slot)
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-  const normalizedWorkstream = normalizeWorkstream(workstream)
-  const normalizedText = cleanMemoryText(text).toLowerCase()
-  const canonicalValue = canonicalKeyTokens(normalizedText).join('-')
-    || createHash('sha1').update(normalizedText).digest('hex').slice(0, 16)
-  return [normalizedType, normalizedWorkstream, normalizedSlot || canonicalValue].filter(Boolean).join(':').slice(0, 160)
-}
-
-function deriveTaskKey(title = '', workstream = '') {
-  const normalizedWorkstream = normalizeWorkstream(workstream)
-  const normalizedTitle = cleanMemoryText(title).toLowerCase()
-  const canonicalTitle = canonicalKeyTokens(normalizedTitle).join('-')
-    || createHash('sha1').update(normalizedTitle).digest('hex').slice(0, 16)
-  return [normalizedWorkstream || 'task', canonicalTitle].join(':').slice(0, 160)
-}
-
-function normalizeFactType(factType) {
-  const value = String(factType ?? '').trim().toLowerCase()
-  return ['preference', 'constraint', 'decision', 'fact'].includes(value) ? value : 'fact'
-}
-
-function normalizeSignalKind(kind) {
-  const value = String(kind ?? '').trim().toLowerCase()
-  return ['language', 'tone', 'time_pref', 'interest', 'cadence'].includes(value) ? value : 'interest'
-}
-
-function normalizeTaskPriority(priority) {
-  const value = String(priority ?? 'normal').trim().toLowerCase()
-  return ['low', 'normal', 'high'].includes(value) ? value : 'normal'
-}
-
-function normalizeTaskStage(stage, details = '') {
-  const raw = String(stage ?? '').trim().toLowerCase()
-  if (['planned', 'investigating', 'implementing', 'wired', 'verified', 'done'].includes(raw)) {
-    return raw
-  }
-  const combined = `${raw} ${String(details).toLowerCase()}`
-  if (/\b(verified|tested|confirmed|working)\b/.test(combined)) return 'verified'
-  if (/\b(wired|hooked|connected|registered|integrated)\b/.test(combined)) return 'wired'
-  if (/\b(implementing|coding|building|refactoring|fixing)\b/.test(combined)) return 'implementing'
-  if (/\b(investigating|researching|checking|exploring|surveying)\b/.test(combined)) return 'investigating'
-  if (/\b(done|completed|resolved|finished|merged|shipped)\b/.test(combined)) return 'done'
-  return 'planned'
-}
-
-function normalizeEvidenceLevel(value, details = '') {
-  const raw = String(value ?? '').trim().toLowerCase()
-  if (['claimed', 'implemented', 'verified'].includes(raw)) return raw
-  const combined = `${raw} ${String(details).toLowerCase()}`
-  if (/\b(verified|tested|confirmed|working)\b/.test(combined)) return 'verified'
-  if (/\b(implemented|added|wired|registered|integrated|exists in code)\b/.test(combined)) return 'implemented'
-  return 'claimed'
-}
-
-function taskStageRank(stage) {
-  switch (String(stage ?? '').trim().toLowerCase()) {
-    case 'planned': return 1
-    case 'investigating': return 2
-    case 'implementing': return 3
-    case 'wired': return 4
-    case 'verified': return 5
-    case 'done': return 6
-    default: return 0
-  }
-}
-
-function taskEvidenceRank(level) {
-  switch (String(level ?? '').trim().toLowerCase()) {
-    case 'claimed': return 1
-    case 'implemented': return 2
-    case 'verified': return 3
-    default: return 0
-  }
-}
-
-function tokenizedWorkstream(value) {
-  return normalizeWorkstream(value).split('-').filter(Boolean)
-}
-
-
 async function getIntentPrototypeVectors() {
   const currentModelId = getEmbeddingModelId()
   if (!intentPrototypeVectorsPromise || intentPrototypeVectorsModelId !== currentModelId) {
@@ -468,7 +271,7 @@ export class MemoryStore {
     try {
       const rdb = new DatabaseSync(this.dbPath, { readOnly: true, allowExtension: true })
       if (sqliteVec) sqliteVec.load(rdb)
-      rdb.exec(`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 1000;`)
+      rdb.exec(`PRAGMA busy_timeout = 1000;`)
       this.readDb = rdb
     } catch (e) {
       process.stderr.write(`[memory] readDb open failed, falling back to main db: ${e.message}\n`)
@@ -629,168 +432,32 @@ export class MemoryStore {
         UNIQUE(kind, doc_key)
       );
 
-      CREATE TABLE IF NOT EXISTS profiles (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
+      CREATE TABLE IF NOT EXISTS classifications (
+        id INTEGER PRIMARY KEY,
+        episode_id INTEGER NOT NULL UNIQUE,
+        ts TEXT NOT NULL,
+        day_key TEXT NOT NULL,
+        classification TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        element TEXT NOT NULL,
+        state TEXT,
         confidence REAL NOT NULL DEFAULT 0.5,
-        first_seen TEXT,
-        last_seen TEXT,
-        source_episode_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'active',
         retrieval_count INTEGER NOT NULL DEFAULT 0,
         last_retrieved_at TEXT,
-        FOREIGN KEY(source_episode_id) REFERENCES episodes(id) ON DELETE SET NULL
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
       );
 
-      CREATE TABLE IF NOT EXISTS facts (
-        id INTEGER PRIMARY KEY,
-        fact_type TEXT NOT NULL,
-        slot TEXT,
-        claim_key TEXT,
-        workstream TEXT,
-        text TEXT NOT NULL,
-        confidence REAL NOT NULL DEFAULT 0.5,
-        first_seen TEXT,
-        last_seen TEXT,
-        source_episode_id INTEGER,
-        status TEXT NOT NULL DEFAULT 'active',
-        mention_count INTEGER NOT NULL DEFAULT 1,
-        UNIQUE(fact_type, text),
-        FOREIGN KEY(source_episode_id) REFERENCES episodes(id) ON DELETE SET NULL
-      );
+      CREATE INDEX IF NOT EXISTS idx_classifications_day ON classifications(day_key, status, updated_at DESC);
 
-      CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts
-        USING fts5(text, tokenize='trigram');
-
-      CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY,
-        title TEXT NOT NULL UNIQUE,
-        task_key TEXT,
-        details TEXT,
-        workstream TEXT,
-        stage TEXT NOT NULL DEFAULT 'planned',
-        evidence_level TEXT NOT NULL DEFAULT 'claimed',
-        status TEXT NOT NULL DEFAULT 'active',
-        priority TEXT NOT NULL DEFAULT 'normal',
-        confidence REAL NOT NULL DEFAULT 0.5,
-        first_seen TEXT,
-        last_seen TEXT,
-        source_episode_id INTEGER,
-        FOREIGN KEY(source_episode_id) REFERENCES episodes(id) ON DELETE SET NULL
-      );
-
-      CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts
-        USING fts5(title, details, tokenize='trigram');
-
-      CREATE TABLE IF NOT EXISTS task_events (
-        id INTEGER PRIMARY KEY,
-        task_id INTEGER NOT NULL,
-        ts TEXT NOT NULL,
-        event_kind TEXT NOT NULL,
-        stage TEXT,
-        evidence_level TEXT,
-        status TEXT,
-        note TEXT,
-        source_episode_id INTEGER,
-        FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-        FOREIGN KEY(source_episode_id) REFERENCES episodes(id) ON DELETE SET NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS interests (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
-        score REAL NOT NULL DEFAULT 0,
-        count INTEGER NOT NULL DEFAULT 0,
-        last_seen TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS signals (
-        id INTEGER PRIMARY KEY,
-        kind TEXT NOT NULL,
-        value TEXT NOT NULL,
-        score REAL NOT NULL DEFAULT 0,
-        first_seen TEXT,
-        last_seen TEXT,
-        source_episode_id INTEGER,
-        UNIQUE(kind, value),
-        FOREIGN KEY(source_episode_id) REFERENCES episodes(id) ON DELETE SET NULL
-      );
-
-      CREATE VIRTUAL TABLE IF NOT EXISTS signals_fts
-        USING fts5(kind, value, tokenize='trigram');
+      CREATE VIRTUAL TABLE IF NOT EXISTS classifications_fts
+        USING fts5(classification, topic, element, state, tokenize='trigram');
 
       CREATE TABLE IF NOT EXISTS memory_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-
-      CREATE TABLE IF NOT EXISTS entities (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        entity_type TEXT NOT NULL DEFAULT 'thing',
-        description TEXT,
-        first_seen TEXT,
-        last_seen TEXT,
-        source_episode_id INTEGER,
-        UNIQUE(name, entity_type)
-      );
-
-      CREATE TABLE IF NOT EXISTS relations (
-        id INTEGER PRIMARY KEY,
-        source_entity_id INTEGER NOT NULL REFERENCES entities(id),
-        target_entity_id INTEGER NOT NULL REFERENCES entities(id),
-        relation_type TEXT NOT NULL,
-        description TEXT,
-        confidence REAL DEFAULT 0.7,
-        first_seen TEXT,
-        last_seen TEXT,
-        status TEXT NOT NULL DEFAULT 'active',
-        source_episode_id INTEGER,
-        UNIQUE(source_entity_id, target_entity_id, relation_type)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_entity_id);
-      CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_entity_id);
-
-      CREATE TABLE IF NOT EXISTS entity_links (
-        id INTEGER PRIMARY KEY,
-        entity_id INTEGER NOT NULL REFERENCES entities(id),
-        linked_type TEXT NOT NULL,
-        linked_id INTEGER NOT NULL,
-        source_episode_id INTEGER,
-        strength REAL NOT NULL DEFAULT 1,
-        UNIQUE(entity_id, linked_type, linked_id),
-        FOREIGN KEY(source_episode_id) REFERENCES episodes(id) ON DELETE SET NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_entity_links_entity ON entity_links(entity_id, linked_type);
-      CREATE INDEX IF NOT EXISTS idx_entity_links_linked ON entity_links(linked_type, linked_id);
-
-      CREATE TABLE IF NOT EXISTS propositions (
-        id INTEGER PRIMARY KEY,
-        subject_key TEXT NOT NULL,
-        proposition_kind TEXT NOT NULL,
-        text TEXT NOT NULL,
-        occurred_on TEXT,
-        confidence REAL NOT NULL DEFAULT 0.5,
-        first_seen TEXT,
-        last_seen TEXT,
-        source_episode_id INTEGER,
-        source_fact_id INTEGER,
-        status TEXT NOT NULL DEFAULT 'active',
-        mention_count INTEGER NOT NULL DEFAULT 1,
-        retrieval_count INTEGER NOT NULL DEFAULT 0,
-        last_retrieved_at TEXT,
-        superseded_by INTEGER REFERENCES propositions(id),
-        UNIQUE(subject_key, proposition_kind, text),
-        FOREIGN KEY(source_episode_id) REFERENCES episodes(id) ON DELETE SET NULL,
-        FOREIGN KEY(source_fact_id) REFERENCES facts(id) ON DELETE SET NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_propositions_subject ON propositions(subject_key, proposition_kind, status);
-      CREATE INDEX IF NOT EXISTS idx_propositions_fact ON propositions(source_fact_id);
-
-      CREATE VIRTUAL TABLE IF NOT EXISTS propositions_fts
-        USING fts5(text, tokenize='trigram');
 
       CREATE TABLE IF NOT EXISTS pending_embeds (
         id INTEGER PRIMARY KEY,
@@ -814,62 +481,39 @@ export class MemoryStore {
     `)
 
     try {
-      this.db.exec(`ALTER TABLE facts ADD COLUMN slot TEXT;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE facts ADD COLUMN claim_key TEXT;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE facts ADD COLUMN workstream TEXT;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE facts ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE facts ADD COLUMN last_retrieved_at TEXT;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE facts ADD COLUMN superseded_by INTEGER REFERENCES facts(id);`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE tasks ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE tasks ADD COLUMN task_key TEXT;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE tasks ADD COLUMN last_retrieved_at TEXT;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE tasks ADD COLUMN workstream TEXT;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE tasks ADD COLUMN stage TEXT NOT NULL DEFAULT 'planned';`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE tasks ADD COLUMN evidence_level TEXT NOT NULL DEFAULT 'claimed';`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE signals ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE signals ADD COLUMN last_retrieved_at TEXT;`)
-    } catch { /* already present */ }
+      this.db.exec(`
+        PRAGMA foreign_keys = OFF;
+        DROP TABLE IF EXISTS task_events;
+        DROP TABLE IF EXISTS interests;
+        DROP TABLE IF EXISTS entity_links;
+        DROP TABLE IF EXISTS relations;
+        DROP TABLE IF EXISTS entities;
+        DROP TABLE IF EXISTS propositions_fts;
+        DROP TABLE IF EXISTS signals_fts;
+        DROP TABLE IF EXISTS tasks_fts;
+        DROP TABLE IF EXISTS facts_fts;
+        DROP TABLE IF EXISTS propositions;
+        DROP TABLE IF EXISTS signals;
+        DROP TABLE IF EXISTS tasks;
+        DROP TABLE IF EXISTS facts;
+        DROP TABLE IF EXISTS profiles;
+        PRAGMA foreign_keys = ON;
+      `)
+      this.db.prepare(`
+        DELETE FROM memory_vectors
+        WHERE entity_type NOT IN ('classification', 'episode')
+      `).run()
+      this.db.prepare(`
+        DELETE FROM pending_embeds
+        WHERE entity_type NOT IN ('classification', 'episode')
+      `).run()
+    } catch (error) {
+      logIgnoredError('legacy schema cleanup', error)
+    }
+
     try {
       this.db.exec(`ALTER TABLE memory_vectors ADD COLUMN content_hash TEXT;`)
     } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE profiles ADD COLUMN status TEXT NOT NULL DEFAULT 'active';`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE profiles ADD COLUMN mention_count INTEGER NOT NULL DEFAULT 1;`)
-    } catch { /* already present */ }
-    try {
-      this.db.exec(`ALTER TABLE signals ADD COLUMN status TEXT NOT NULL DEFAULT 'active';`)
-    } catch { /* already present */ }
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_slot ON facts(slot);`)
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_claim_key ON facts(claim_key);`)
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_task_key ON tasks(task_key);`)
 
     this.insertEpisodeStmt = this.db.prepare(`
       INSERT OR IGNORE INTO episodes (
@@ -887,16 +531,39 @@ export class MemoryStore {
       INSERT INTO memory_candidates (episode_id, ts, day_key, role, content, score)
       VALUES (?, ?, ?, ?, ?, ?)
     `)
+    this.upsertClassificationStmt = this.db.prepare(`
+      INSERT INTO classifications (episode_id, ts, day_key, classification, topic, element, state, confidence, status, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', unixepoch())
+      ON CONFLICT(episode_id) DO UPDATE SET
+        ts = excluded.ts,
+        day_key = excluded.day_key,
+        classification = excluded.classification,
+        topic = excluded.topic,
+        element = excluded.element,
+        state = excluded.state,
+        confidence = MAX(classifications.confidence, excluded.confidence),
+        status = 'active',
+        updated_at = unixepoch()
+    `)
+    this.getClassificationByEpisodeStmt = this.db.prepare(`
+      SELECT id
+      FROM classifications
+      WHERE episode_id = ?
+    `)
+    this.deleteClassificationFtsStmt = this.db.prepare(`DELETE FROM classifications_fts WHERE rowid = ?`)
+    this.insertClassificationFtsStmt = this.db.prepare(`
+      INSERT INTO classifications_fts(rowid, classification, topic, element, state)
+      VALUES (?, ?, ?, ?, ?)
+    `)
+    this.bumpClassificationRetrievalStmt = this.db.prepare(`
+      UPDATE classifications
+      SET retrieval_count = retrieval_count + 1,
+          last_retrieved_at = ?
+      WHERE id = ?
+    `)
     this.clearCandidatesStmt = this.db.prepare(`DELETE FROM memory_candidates`)
-    this.clearFactsStmt = this.db.prepare(`DELETE FROM facts`)
-    this.clearTasksStmt = this.db.prepare(`DELETE FROM tasks`)
-    this.clearSignalsStmt = this.db.prepare(`DELETE FROM signals`)
-    this.clearPropositionsStmt = this.db.prepare(`DELETE FROM propositions`)
-    this.clearEntityLinksStmt = this.db.prepare(`DELETE FROM entity_links`)
-    this.clearFactsFtsStmt = this.db.prepare(`DELETE FROM facts_fts`)
-    this.clearTasksFtsStmt = this.db.prepare(`DELETE FROM tasks_fts`)
-    this.clearSignalsFtsStmt = this.db.prepare(`DELETE FROM signals_fts`)
-    this.clearPropositionsFtsStmt = this.db.prepare(`DELETE FROM propositions_fts`)
+    this.clearClassificationsStmt = this.db.prepare(`DELETE FROM classifications`)
+    this.clearClassificationsFtsStmt = this.db.prepare(`DELETE FROM classifications_fts`)
     this.clearVectorsStmt = this.db.prepare(`DELETE FROM memory_vectors`)
     this.getMetaStmt = this.db.prepare(`SELECT value FROM memory_meta WHERE key = ?`)
     this.upsertMetaStmt = this.db.prepare(`
@@ -909,259 +576,6 @@ export class MemoryStore {
       FROM memory_vectors
       WHERE model = ?
       LIMIT 1
-    `)
-    this.upsertDocumentStmt = this.db.prepare(`
-      INSERT INTO documents (kind, doc_key, content, updated_at)
-      VALUES (?, ?, ?, unixepoch())
-      ON CONFLICT(kind, doc_key) DO UPDATE SET
-        content = excluded.content,
-        updated_at = unixepoch()
-    `)
-    this.upsertProfileStmt = this.db.prepare(`
-      INSERT INTO profiles (key, value, confidence, first_seen, last_seen, source_episode_id, mention_count)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-      ON CONFLICT(key) DO UPDATE SET
-        mention_count = profiles.mention_count + 1,
-        value = CASE WHEN profiles.mention_count + 1 >= 3 THEN excluded.value ELSE profiles.value END,
-        confidence = CASE WHEN profiles.mention_count + 1 >= 3 THEN MAX(profiles.confidence, excluded.confidence) ELSE profiles.confidence END,
-        last_seen = excluded.last_seen,
-        source_episode_id = COALESCE(excluded.source_episode_id, profiles.source_episode_id)
-    `)
-    this.bumpProfileRetrievalStmt = this.db.prepare(`
-      UPDATE profiles
-      SET retrieval_count = retrieval_count + 1,
-          last_retrieved_at = ?
-      WHERE key = ?
-    `)
-    this.upsertFactStmt = this.db.prepare(`
-      INSERT INTO facts (fact_type, slot, claim_key, workstream, text, confidence, first_seen, last_seen, source_episode_id, status, mention_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1)
-      ON CONFLICT(fact_type, text) DO UPDATE SET
-        slot = COALESCE(excluded.slot, facts.slot),
-        claim_key = COALESCE(excluded.claim_key, facts.claim_key),
-        workstream = COALESCE(excluded.workstream, facts.workstream),
-        confidence = MAX(facts.confidence, excluded.confidence),
-        last_seen = excluded.last_seen,
-        source_episode_id = COALESCE(excluded.source_episode_id, facts.source_episode_id),
-        status = 'active',
-        mention_count = facts.mention_count + 1
-    `)
-    this.getFactRowByClaimKeyStmt = this.db.prepare(`
-      SELECT id, fact_type, slot, claim_key, workstream, text, confidence
-      FROM facts
-      WHERE fact_type = ? AND claim_key = ? AND status = 'active'
-      ORDER BY confidence DESC, mention_count DESC, last_seen DESC
-      LIMIT 1
-    `)
-    this.updateFactByIdStmt = this.db.prepare(`
-      UPDATE facts
-      SET slot = ?, claim_key = ?, workstream = ?, text = ?, confidence = ?, last_seen = ?,
-          source_episode_id = COALESCE(?, source_episode_id), status = 'active',
-          mention_count = mention_count + 1
-      WHERE id = ?
-    `)
-    this.bumpFactSeenStmt = this.db.prepare(`
-      UPDATE facts
-      SET last_seen = ?, mention_count = mention_count + 1
-      WHERE id = ?
-    `)
-    this.staleFactSlotStmt = this.db.prepare(`
-      UPDATE facts
-      SET status = 'stale'
-      WHERE slot = ?
-        AND text != ?
-        AND status = 'active'
-    `)
-    this.getFactIdStmt = this.db.prepare(`
-      SELECT id FROM facts WHERE fact_type = ? AND text = ?
-    `)
-    this.getFactIdByClaimKeyStmt = this.db.prepare(`
-      SELECT id
-      FROM facts
-      WHERE fact_type = ? AND claim_key = ? AND status = 'active'
-      ORDER BY confidence DESC, mention_count DESC, last_seen DESC
-      LIMIT 1
-    `)
-    this.deleteFactFtsStmt = this.db.prepare(`DELETE FROM facts_fts WHERE rowid = ?`)
-    this.insertFactFtsStmt = this.db.prepare(`INSERT INTO facts_fts(rowid, text) VALUES (?, ?)`)
-    this.upsertTaskStmt = this.db.prepare(`
-      INSERT INTO tasks (title, task_key, details, workstream, stage, evidence_level, status, priority, confidence, first_seen, last_seen, source_episode_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(title) DO UPDATE SET
-        task_key = COALESCE(excluded.task_key, tasks.task_key),
-        details = excluded.details,
-        workstream = COALESCE(excluded.workstream, tasks.workstream),
-        stage = excluded.stage,
-        evidence_level = excluded.evidence_level,
-        status = excluded.status,
-        priority = excluded.priority,
-        confidence = MAX(tasks.confidence, excluded.confidence),
-        last_seen = excluded.last_seen,
-        source_episode_id = COALESCE(excluded.source_episode_id, tasks.source_episode_id)
-    `)
-    this.getTaskRowByKeyStmt = this.db.prepare(`
-      SELECT id, title, status, stage, evidence_level
-      FROM tasks
-      WHERE task_key = ?
-      ORDER BY confidence DESC, last_seen DESC
-      LIMIT 1
-    `)
-    this.updateTaskByIdStmt = this.db.prepare(`
-      UPDATE tasks
-      SET title = ?, task_key = ?, details = ?, workstream = ?, stage = ?, evidence_level = ?,
-          status = ?, priority = ?, confidence = MAX(confidence, ?), last_seen = ?,
-          source_episode_id = COALESCE(?, source_episode_id)
-      WHERE id = ?
-    `)
-    this.getTaskRowStmt = this.db.prepare(`
-      SELECT id, status, stage, evidence_level FROM tasks WHERE title = ?
-    `)
-    this.getTaskIdStmt = this.db.prepare(`
-      SELECT id FROM tasks WHERE title = ?
-    `)
-    this.getTaskIdByKeyStmt = this.db.prepare(`
-      SELECT id
-      FROM tasks
-      WHERE task_key = ?
-      ORDER BY confidence DESC, last_seen DESC
-      LIMIT 1
-    `)
-    this.deleteTaskFtsStmt = this.db.prepare(`DELETE FROM tasks_fts WHERE rowid = ?`)
-    this.insertTaskFtsStmt = this.db.prepare(`INSERT INTO tasks_fts(rowid, title, details) VALUES (?, ?, ?)`)
-    this.insertTaskEventStmt = this.db.prepare(`
-      INSERT INTO task_events (task_id, ts, event_kind, stage, evidence_level, status, note, source_episode_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    this.getTaskEventsStmt = this.db.prepare(`
-      SELECT ts, event_kind, stage, evidence_level, status, note
-      FROM task_events
-      WHERE task_id = ?
-      ORDER BY ts ASC, id ASC
-    `)
-    this.updateTaskProjectionStmt = this.db.prepare(`
-      UPDATE tasks
-      SET stage = ?, evidence_level = ?, status = ?
-      WHERE id = ?
-    `)
-    this.clearInterestsStmt = this.db.prepare(`DELETE FROM interests`)
-    this.insertInterestStmt = this.db.prepare(`
-      INSERT INTO interests (name, score, count, last_seen)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(name) DO UPDATE SET
-        score = excluded.score,
-        count = excluded.count,
-        last_seen = excluded.last_seen
-    `)
-    this.upsertSignalStmt = this.db.prepare(`
-      INSERT INTO signals (kind, value, score, first_seen, last_seen, source_episode_id)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(kind, value) DO UPDATE SET
-        score = MIN(1.5, MAX(signals.score, excluded.score) + 0.05),
-        last_seen = excluded.last_seen,
-        source_episode_id = COALESCE(excluded.source_episode_id, signals.source_episode_id)
-    `)
-    this.getSignalIdStmt = this.db.prepare(`
-      SELECT id FROM signals WHERE kind = ? AND value = ?
-    `)
-    this.deleteSignalFtsStmt = this.db.prepare(`DELETE FROM signals_fts WHERE rowid = ?`)
-    this.insertSignalFtsStmt = this.db.prepare(`INSERT INTO signals_fts(rowid, kind, value) VALUES (?, ?, ?)`)
-    this.upsertEntityLinkStmt = this.db.prepare(`
-      INSERT INTO entity_links (entity_id, linked_type, linked_id, source_episode_id, strength)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(entity_id, linked_type, linked_id) DO UPDATE SET
-        source_episode_id = COALESCE(excluded.source_episode_id, entity_links.source_episode_id),
-        strength = MAX(entity_links.strength, excluded.strength)
-    `)
-    this.listEntityLinksStmt = this.db.prepare(`
-      SELECT entity_id, linked_type, linked_id, strength
-      FROM entity_links
-      WHERE entity_id = ?
-      ORDER BY strength DESC, linked_type ASC, linked_id ASC
-    `)
-    this.upsertPropositionStmt = this.db.prepare(`
-      INSERT INTO propositions (
-        subject_key, proposition_kind, text, occurred_on, confidence, first_seen, last_seen,
-        source_episode_id, source_fact_id, status, mention_count
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1)
-      ON CONFLICT(subject_key, proposition_kind, text) DO UPDATE SET
-        confidence = MAX(propositions.confidence, excluded.confidence),
-        occurred_on = COALESCE(excluded.occurred_on, propositions.occurred_on),
-        last_seen = excluded.last_seen,
-        source_episode_id = COALESCE(excluded.source_episode_id, propositions.source_episode_id),
-        source_fact_id = COALESCE(excluded.source_fact_id, propositions.source_fact_id),
-        status = 'active',
-        mention_count = propositions.mention_count + 1
-    `)
-    this.findPropositionStmt = this.db.prepare(`
-      SELECT id, subject_key, proposition_kind, text, occurred_on, confidence
-      FROM propositions
-      WHERE subject_key = ? AND proposition_kind = ? AND text = ?
-    `)
-    this.listSiblingPropositionsStmt = this.db.prepare(`
-      SELECT id, text, occurred_on
-      FROM propositions
-      WHERE subject_key = ?
-        AND proposition_kind = ?
-        AND status = 'active'
-        AND id != ?
-    `)
-    this.markPropositionSupersededStmt = this.db.prepare(`
-      UPDATE propositions
-      SET status = 'superseded',
-          superseded_by = ?,
-          last_seen = ?
-      WHERE id = ?
-    `)
-    this.bumpPropositionRetrievalStmt = this.db.prepare(`
-      UPDATE propositions
-      SET retrieval_count = retrieval_count + 1,
-          last_retrieved_at = ?
-      WHERE id = ?
-    `)
-    this.deletePropositionFtsStmt = this.db.prepare(`DELETE FROM propositions_fts WHERE rowid = ?`)
-    this.insertPropositionFtsStmt = this.db.prepare(`INSERT INTO propositions_fts(rowid, text) VALUES (?, ?)`)
-    this.markFactsStaleStmt = this.db.prepare(`
-      UPDATE facts
-      SET status = 'stale'
-      WHERE status = 'active'
-        AND fact_type = ?
-        AND last_seen IS NOT NULL
-        AND julianday('now') - julianday(last_seen) > ?
-        AND mention_count < 3
-    `)
-    this.reviveFactsStmt = this.db.prepare(`
-      UPDATE facts
-      SET status = 'active'
-      WHERE status = 'stale'
-        AND fact_type = ?
-        AND text = ?
-    `)
-    this.markTasksStaleStmt = this.db.prepare(`
-      UPDATE tasks
-      SET status = 'stale'
-      WHERE status IN ('active', 'in_progress', 'paused')
-        AND last_seen IS NOT NULL
-        AND julianday('now') - julianday(last_seen) > 45
-        AND confidence < 0.75
-    `)
-    this.bumpFactRetrievalStmt = this.db.prepare(`
-      UPDATE facts
-      SET retrieval_count = retrieval_count + 1,
-          last_retrieved_at = ?
-      WHERE id = ?
-    `)
-    this.bumpTaskRetrievalStmt = this.db.prepare(`
-      UPDATE tasks
-      SET retrieval_count = retrieval_count + 1,
-          last_retrieved_at = ?
-      WHERE id = ?
-    `)
-    this.bumpSignalRetrievalStmt = this.db.prepare(`
-      UPDATE signals
-      SET retrieval_count = retrieval_count + 1,
-          last_retrieved_at = ?
-      WHERE id = ?
     `)
     this.upsertVectorStmt = this.db.prepare(`
       INSERT INTO memory_vectors (entity_type, entity_id, model, dims, vector_json, content_hash, updated_at)
@@ -1177,68 +591,18 @@ export class MemoryStore {
       FROM memory_vectors
       WHERE entity_type = ? AND entity_id = ? AND model = ?
     `)
-    this.listDenseFactRowsStmt = this.db.prepare(`
-      SELECT 'fact' AS type, f.fact_type AS subtype, f.id AS entity_id, f.workstream AS workstream, f.text AS content,
-             unixepoch(f.last_seen) AS updated_at, f.retrieval_count AS retrieval_count,
-             f.confidence AS quality_score,
+    this.listDenseClassificationRowsStmt = this.db.prepare(`
+      SELECT 'classification' AS type, c.classification AS subtype, c.id AS entity_id,
+             trim(c.classification || ' | ' || c.topic || ' | ' || c.element || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
+             c.updated_at AS updated_at, c.retrieval_count AS retrieval_count,
+             c.confidence AS quality_score,
              e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend, mv.vector_json AS vector_json
       FROM memory_vectors mv
-      JOIN facts f ON f.id = mv.entity_id
-      LEFT JOIN episodes e ON e.id = f.source_episode_id
-      WHERE mv.entity_type = 'fact'
+      JOIN classifications c ON c.id = mv.entity_id
+      LEFT JOIN episodes e ON e.id = c.episode_id
+      WHERE mv.entity_type = 'classification'
         AND mv.model = ?
-        AND f.status = 'active'
-    `)
-    this.listDenseTaskRowsStmt = this.db.prepare(`
-      SELECT 'task' AS type, t.stage AS subtype, t.id AS entity_id, t.workstream AS workstream,
-             trim(t.title || CASE WHEN t.details IS NOT NULL AND t.details != '' THEN ' — ' || t.details ELSE '' END) AS content,
-             unixepoch(t.last_seen) AS updated_at, t.retrieval_count AS retrieval_count,
-             t.confidence AS quality_score,
-             t.stage AS stage, t.evidence_level AS evidence_level, t.status AS status,
-             e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend, mv.vector_json AS vector_json
-      FROM memory_vectors mv
-      JOIN tasks t ON t.id = mv.entity_id
-      LEFT JOIN episodes e ON e.id = t.source_episode_id
-      WHERE mv.entity_type = 'task'
-        AND mv.model = ?
-        AND t.status IN ('active', 'in_progress', 'paused')
-    `)
-    this.listDenseTaskRowsWithDoneStmt = this.db.prepare(`
-      SELECT 'task' AS type, t.stage AS subtype, t.id AS entity_id, t.workstream AS workstream,
-             trim(t.title || CASE WHEN t.details IS NOT NULL AND t.details != '' THEN ' — ' || t.details ELSE '' END) AS content,
-             unixepoch(t.last_seen) AS updated_at, t.retrieval_count AS retrieval_count,
-             t.confidence AS quality_score,
-             t.stage AS stage, t.evidence_level AS evidence_level, t.status AS status,
-             e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend, mv.vector_json AS vector_json
-      FROM memory_vectors mv
-      JOIN tasks t ON t.id = mv.entity_id
-      LEFT JOIN episodes e ON e.id = t.source_episode_id
-      WHERE mv.entity_type = 'task'
-        AND mv.model = ?
-        AND t.status IN ('active', 'in_progress', 'paused', 'done')
-    `)
-    this.listDenseSignalRowsStmt = this.db.prepare(`
-      SELECT 'signal' AS type, s.kind AS subtype, s.id AS entity_id, s.value AS content,
-             unixepoch(s.last_seen) AS updated_at, s.retrieval_count AS retrieval_count,
-             s.score AS quality_score,
-             e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend, mv.vector_json AS vector_json
-      FROM memory_vectors mv
-      JOIN signals s ON s.id = mv.entity_id
-      LEFT JOIN episodes e ON e.id = s.source_episode_id
-      WHERE mv.entity_type = 'signal'
-        AND mv.model = ?
-    `)
-    this.listDensePropositionRowsStmt = this.db.prepare(`
-      SELECT 'proposition' AS type, p.proposition_kind AS subtype, p.id AS entity_id, p.text AS content,
-             unixepoch(p.last_seen) AS updated_at, p.retrieval_count AS retrieval_count,
-             p.confidence AS quality_score,
-             e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend, mv.vector_json AS vector_json
-      FROM memory_vectors mv
-      JOIN propositions p ON p.id = mv.entity_id
-      LEFT JOIN episodes e ON e.id = p.source_episode_id
-      WHERE mv.entity_type = 'proposition'
-        AND mv.model = ?
-        AND p.status = 'active'
+        AND c.status = 'active'
     `)
     this.listDenseEpisodeRowsStmt = this.db.prepare(`
       SELECT 'episode' AS type, e.role AS subtype, e.id AS entity_id, e.content AS content,
@@ -1249,29 +613,6 @@ export class MemoryStore {
       WHERE mv.entity_type = 'episode'
         AND mv.model = ?
         AND e.kind IN (${RECALL_EPISODE_KIND_SQL})
-    `)
-    this.listDenseEntityRowsStmt = this.db.prepare(`
-      SELECT 'entity' AS type, en.entity_type AS subtype, en.id AS entity_id,
-             trim(en.name || CASE WHEN en.description IS NOT NULL AND en.description != '' THEN ' — ' || en.description ELSE '' END) AS content,
-             unixepoch(en.last_seen) AS updated_at, 0 AS retrieval_count,
-             NULL AS source_ref, NULL AS source_ts, NULL AS source_kind, NULL AS source_backend, mv.vector_json AS vector_json
-      FROM memory_vectors mv
-      JOIN entities en ON en.id = mv.entity_id
-      WHERE mv.entity_type = 'entity'
-        AND mv.model = ?
-    `)
-    this.listDenseRelationRowsStmt = this.db.prepare(`
-      SELECT 'relation' AS type, r.relation_type AS subtype, r.id AS entity_id,
-             trim(se.name || ' -> ' || te.name || CASE WHEN r.description IS NOT NULL AND r.description != '' THEN ' — ' || r.description ELSE '' END) AS content,
-             unixepoch(r.last_seen) AS updated_at, 0 AS retrieval_count,
-             NULL AS source_ref, NULL AS source_ts, NULL AS source_kind, NULL AS source_backend, mv.vector_json AS vector_json
-      FROM memory_vectors mv
-      JOIN relations r ON r.id = mv.entity_id
-      JOIN entities se ON se.id = r.source_entity_id
-      JOIN entities te ON te.id = r.target_entity_id
-      WHERE mv.entity_type = 'relation'
-        AND mv.model = ?
-        AND r.status = 'active'
     `)
   }
 
@@ -1287,11 +628,14 @@ export class MemoryStore {
       if (this._retrievalTuningCache?.mtimeMs === mtimeMs) return this._retrievalTuningCache.value
       const raw = JSON.parse(readFileSync(configPath, 'utf8'))
       const value = mergeMemoryTuning(raw?.retrieval ?? {})
+      const featureFlags = readMemoryFeatureFlags(raw)
+      value.reranker.enabled = featureFlags.reranker
       this._retrievalTuningCache = { mtimeMs, value }
       return value
     } catch {
       if (this._retrievalTuningCache?.value) return this._retrievalTuningCache.value
       const value = mergeMemoryTuning()
+      value.reranker.enabled = false
       this._retrievalTuningCache = { mtimeMs: 0, value }
       return value
     }
@@ -1335,281 +679,7 @@ export class MemoryStore {
   }
 
   backfillCanonicalKeys() {
-    const factRows = this.db.prepare(`
-      SELECT id, fact_type, slot, workstream, text
-      FROM facts
-      WHERE claim_key IS NULL OR claim_key = ''
-    `).all()
-    for (const row of factRows) {
-      const claimKey = deriveClaimKey(row.fact_type, row.slot, row.text, row.workstream)
-      this.db.prepare(`UPDATE facts SET claim_key = ? WHERE id = ?`).run(claimKey, row.id)
-    }
-
-    const taskRows = this.db.prepare(`
-      SELECT id, title, workstream
-      FROM tasks
-      WHERE task_key IS NULL OR task_key = ''
-    `).all()
-    for (const row of taskRows) {
-      const taskKey = deriveTaskKey(row.title, row.workstream)
-      this.db.prepare(`UPDATE tasks SET task_key = ? WHERE id = ?`).run(taskKey, row.id)
-    }
-  }
-
-  deriveSubjectKey(text, propositionKind = 'fact') {
-    const clean = cleanMemoryText(text)
-    if (!clean) return propositionKind
-    try {
-      const entities = this.db.prepare(`
-        SELECT name
-        FROM entities
-        ORDER BY length(name) DESC, id ASC
-      `).all()
-      for (const entity of entities) {
-        if (entity?.name && clean.toLowerCase().includes(String(entity.name).toLowerCase())) {
-          return String(entity.name)
-        }
-      }
-    } catch { /* ignore */ }
-    const tokens = propositionSubjectTokens(clean)
-    if (tokens.length === 0) return propositionKind
-    return tokens.slice(0, 2).join('-')
-  }
-
-  upsertPropositions(items = [], seenAt = null, sourceEpisodeId = null, sourceFactId = null) {
-    const seenKeys = new Set()
-    for (const item of items) {
-      const text = cleanMemoryText(item?.text)
-      const propositionKind = normalizeFactSlot(item?.propositionKind) || 'fact'
-      if (!text) continue
-      const subjectKey = normalizeWorkstream(item?.subjectKey) || normalizeWorkstream(this.deriveSubjectKey(text, propositionKind)) || propositionKind
-      const occurredOn = item?.occurredOn ?? extractExplicitDate(text) ?? (seenAt ? String(seenAt).slice(0, 10) : null)
-      const confidence = Number(item?.confidence ?? 0.6)
-      const dedupeKey = `${subjectKey}:${propositionKind}:${text}`
-      if (seenKeys.has(dedupeKey)) continue
-      seenKeys.add(dedupeKey)
-      this.upsertPropositionStmt.run(
-        subjectKey,
-        propositionKind,
-        text,
-        occurredOn,
-        confidence,
-        seenAt,
-        seenAt,
-        sourceEpisodeId,
-        sourceFactId,
-      )
-      const row = this.findPropositionStmt.get(subjectKey, propositionKind, text)
-      if (!row?.id) continue
-      this.deletePropositionFtsStmt.run(row.id)
-      this.insertPropositionFtsStmt.run(row.id, text)
-      const siblings = this.listSiblingPropositionsStmt.all(subjectKey, propositionKind, row.id)
-      for (const sibling of siblings) {
-        const siblingDate = sibling?.occurred_on ? new Date(String(sibling.occurred_on)).getTime() : 0
-        const rowDate = occurredOn ? new Date(String(occurredOn)).getTime() : 0
-        const lexicalOverlap = (() => {
-          const left = new Set(tokenizeMemoryText(text))
-          const right = new Set(tokenizeMemoryText(String(sibling?.text ?? '')))
-          const overlap = [...left].filter(token => right.has(token)).length
-          return left.size > 0 ? overlap / left.size : 0
-        })()
-        if (String(sibling?.text ?? '') === text) continue
-        if (rowDate && siblingDate && rowDate < siblingDate) continue
-        if (lexicalOverlap < 0.35) continue
-        this.markPropositionSupersededStmt.run(row.id, seenAt ?? localNow(), sibling.id)
-      }
-      this.linkMemoryToEntities(text, 'proposition', row.id, sourceEpisodeId)
-    }
-  }
-
-  linkMemoryToEntities(text, linkedType, linkedId, sourceEpisodeId = null) {
-    const clean = cleanMemoryText(text)
-    if (!clean || !linkedType || !Number.isFinite(Number(linkedId))) return
-    let entities = []
-    try {
-      entities = this.db.prepare(`
-        SELECT id, name
-        FROM entities
-        ORDER BY length(name) DESC, id ASC
-      `).all()
-    } catch {
-      return
-    }
-    const lowered = clean.toLowerCase()
-    for (const entity of entities) {
-      const name = String(entity?.name ?? '').trim()
-      if (!name) continue
-      if (!lowered.includes(name.toLowerCase())) continue
-      const strength = Math.min(1.5, Math.max(0.6, name.length / 20))
-      this.upsertEntityLinkStmt.run(entity.id, linkedType, Number(linkedId), sourceEpisodeId, strength)
-    }
-  }
-
-  rebuildEntityLinks() {
-    this.clearEntityLinksStmt.run()
-
-    const factRows = this.db.prepare(`SELECT id, text, source_episode_id FROM facts WHERE status = 'active'`).all()
-    for (const row of factRows) this.linkMemoryToEntities(row.text, 'fact', row.id, row.source_episode_id)
-
-    const taskRows = this.db.prepare(`
-      SELECT id,
-             trim(title || CASE WHEN details IS NOT NULL AND details != '' THEN ' — ' || details ELSE '' END) AS content,
-             source_episode_id
-      FROM tasks
-      WHERE status IN ('active', 'in_progress', 'paused', 'done')
-    `).all()
-    for (const row of taskRows) this.linkMemoryToEntities(row.content, 'task', row.id, row.source_episode_id)
-
-    const propositionRows = this.db.prepare(`SELECT id, text, source_episode_id FROM propositions WHERE status = 'active'`).all()
-    for (const row of propositionRows) this.linkMemoryToEntities(row.text, 'proposition', row.id, row.source_episode_id)
-
-    const episodeRows = this.db.prepare(`
-      SELECT id, content
-      FROM episodes
-      WHERE role = 'user'
-        AND kind = 'message'
-    `).all()
-    for (const row of episodeRows) this.linkMemoryToEntities(row.content, 'episode', row.id, row.id)
-  }
-
-  resolveQueryEntityScope(query = '') {
-    const clean = cleanMemoryText(query)
-    if (!clean) return []
-    try {
-      const entities = this.db.prepare(`
-        SELECT id, name, entity_type, description, source_episode_id
-        FROM entities
-        ORDER BY length(name) DESC, last_seen DESC, id ASC
-      `).all()
-      const lowered = clean.toLowerCase()
-      const rows = entities.filter(entity => {
-        const name = String(entity?.name ?? '').trim().toLowerCase()
-        if (!name) return false
-        return lowered.includes(name)
-      }).slice(0, 8)
-      const seen = new Set()
-      return rows.filter(row => {
-        if (seen.has(row.id)) return false
-        seen.add(row.id)
-        return true
-      })
-    } catch {
-      return []
-    }
-  }
-
-  getEntityScopedResults(queryEntities = [], limit = 6, options = {}) {
-    const results = []
-    const seen = new Set()
-    if (Boolean(options.preferRelations) && queryEntities.length >= 2) {
-      const entityIds = queryEntities.map(entity => Number(entity.id)).filter(Number.isFinite)
-      const relations = this.db.prepare(`
-        SELECT 'relation' AS type, r.relation_type AS subtype, r.id AS entity_id,
-               trim(se.name || ' -> ' || te.name || CASE WHEN r.description IS NOT NULL AND r.description != '' THEN ' — ' || r.description ELSE '' END) AS content,
-               unixepoch(r.last_seen) AS updated_at, 0 AS retrieval_count,
-               r.confidence AS quality_score, r.source_episode_id AS source_episode_id,
-               ep.kind AS source_kind, ep.backend AS source_backend
-        FROM relations r
-        JOIN entities se ON se.id = r.source_entity_id
-        JOIN entities te ON te.id = r.target_entity_id
-        LEFT JOIN episodes ep ON ep.id = r.source_episode_id
-        WHERE r.status = 'active'
-          AND r.source_entity_id IN (${entityIds.map(() => '?').join(', ')})
-          AND r.target_entity_id IN (${entityIds.map(() => '?').join(', ')})
-        ORDER BY r.confidence DESC, r.last_seen DESC
-        LIMIT ?
-      `).all(...entityIds, ...entityIds, Math.max(2, limit))
-      for (const relation of relations) {
-        const key = `${relation.type}:${relation.entity_id}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        results.push({ ...relation, score: SCOPED_LANE_PRIOR.graph_multi_relation })
-      }
-    }
-    if (queryEntities.length === 1) {
-      const entityId = Number(queryEntities[0].id)
-      const relations = this.db.prepare(`
-        SELECT 'relation' AS type, r.relation_type AS subtype, r.id AS entity_id,
-               trim(se.name || ' -> ' || te.name || CASE WHEN r.description IS NOT NULL AND r.description != '' THEN ' — ' || r.description ELSE '' END) AS content,
-               unixepoch(r.last_seen) AS updated_at, 0 AS retrieval_count,
-               r.confidence AS quality_score, r.source_episode_id AS source_episode_id,
-               ep.kind AS source_kind, ep.backend AS source_backend
-        FROM relations r
-        JOIN entities se ON se.id = r.source_entity_id
-        JOIN entities te ON te.id = r.target_entity_id
-        LEFT JOIN episodes ep ON ep.id = r.source_episode_id
-        WHERE r.status = 'active'
-          AND (r.source_entity_id = ? OR r.target_entity_id = ?)
-        ORDER BY r.confidence DESC, r.last_seen DESC
-        LIMIT ?
-      `).all(entityId, entityId, Math.max(2, limit))
-      for (const relation of relations) {
-        const key = `${relation.type}:${relation.entity_id}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        results.push({ ...relation, score: SCOPED_LANE_PRIOR.graph_single_relation })
-      }
-    }
-    for (const entity of queryEntities) {
-      const links = this.listEntityLinksStmt.all(entity.id).slice(0, Math.max(3, limit))
-      for (const link of links) {
-        let row = null
-        if (link.linked_type === 'fact') row = this._getEntityMeta('fact', link.linked_id, getEmbeddingModelId())
-        else if (link.linked_type === 'task') row = this._getEntityMeta('task', link.linked_id, getEmbeddingModelId())
-        else if (link.linked_type === 'proposition') row = this._getEntityMeta('proposition', link.linked_id, getEmbeddingModelId())
-        else if (link.linked_type === 'episode') row = this._getEntityMeta('episode', link.linked_id, getEmbeddingModelId())
-        if (!row) continue
-        const key = `${row.type}:${row.entity_id}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        results.push({
-          ...row,
-          score: SCOPED_LANE_PRIOR.graph_entity_link,
-          scoped_entity_id: entity.id,
-          scoped_entity_name: entity.name,
-        })
-        if (results.length >= limit) return results
-      }
-    }
-    return results
-  }
-
-  getRuleScopedResults(query = '', limit = 6) {
-    const clean = cleanMemoryText(query)
-    if (!clean || !isRuleQuery(clean)) return []
-    const tokens = propositionSubjectTokens(clean).slice(0, 8)
-    if (tokens.length === 0) return []
-    const patterns = tokens.map(token => `%${token}%`)
-    const results = []
-    try {
-      results.push(...this.db.prepare(`
-        SELECT 'fact' AS type, fact_type AS subtype, CAST(id AS TEXT) AS ref, text AS content,
-               unixepoch(last_seen) AS updated_at, id AS entity_id, retrieval_count,
-               confidence AS quality_score, source_episode_id
-        FROM facts
-        WHERE status = 'active'
-          AND fact_type = 'constraint'
-          AND (${patterns.map(() => 'text LIKE ?').join(' OR ')})
-        ORDER BY confidence DESC, mention_count DESC, last_seen DESC
-        LIMIT ?
-      `).all(...patterns, Math.max(3, limit)))
-    } catch { /* ignore */ }
-    try {
-      results.push(...this.db.prepare(`
-        SELECT 'proposition' AS type, proposition_kind AS subtype, CAST(id AS TEXT) AS ref, text AS content,
-               unixepoch(last_seen) AS updated_at, id AS entity_id, retrieval_count,
-               confidence AS quality_score, source_episode_id, source_fact_id
-        FROM propositions
-        WHERE status = 'active'
-          AND (${patterns.map(() => 'text LIKE ?').join(' OR ')})
-        ORDER BY confidence DESC, mention_count DESC, last_seen DESC
-        LIMIT ?
-      `).all(...patterns, Math.max(3, limit)))
-    } catch { /* ignore */ }
-    return results
-      .sort((left, right) => Number(right.quality_score ?? 0) - Number(left.quality_score ?? 0))
-      .slice(0, limit)
-      .map(item => ({ ...item, score: SCOPED_LANE_PRIOR.rule }))
+    return
   }
 
   /**
@@ -1640,56 +710,11 @@ export class MemoryStore {
   }
 
   rebuildDerivedIndexes() {
-    this.clearFactsFtsStmt.run()
-    this.clearTasksFtsStmt.run()
-    this.clearSignalsFtsStmt.run()
-    this.clearPropositionsFtsStmt.run()
-
-    const facts = this.db.prepare(`SELECT id, text FROM facts`).all()
-    for (const row of facts) {
-      try { this.deleteFactFtsStmt.run(row.id) } catch (error) { logIgnoredError('rebuild facts fts delete', error) }
-      try { this.insertFactFtsStmt.run(row.id, row.text) } catch (error) { logIgnoredError('rebuild facts fts insert', error) }
-    }
-
-    const tasks = this.db.prepare(`SELECT id, title, details FROM tasks`).all()
-    for (const row of tasks) {
-      try { this.deleteTaskFtsStmt.run(row.id) } catch (error) { logIgnoredError('rebuild tasks fts delete', error) }
-      try { this.insertTaskFtsStmt.run(row.id, row.title, row.details ?? '') } catch (error) { logIgnoredError('rebuild tasks fts insert', error) }
-    }
-
-    const signals = this.db.prepare(`SELECT id, kind, value FROM signals`).all()
-    for (const row of signals) {
-      try {
-        this.insertSignalFtsStmt.run(row.id, row.kind, row.value)
-      } catch (error) { logIgnoredError('rebuild signals fts insert', error) }
-    }
-
-    const propositions = this.db.prepare(`SELECT id, text FROM propositions WHERE status = 'active'`).all()
-    for (const row of propositions) {
-      try { this.deletePropositionFtsStmt.run(row.id) } catch (error) { logIgnoredError('rebuild propositions fts delete', error) }
-      try { this.insertPropositionFtsStmt.run(row.id, row.text) } catch (error) { logIgnoredError('rebuild propositions fts insert', error) }
-    }
-
+    return
   }
 
   needsDerivedIndexRebuild() {
-    try {
-      const checks = [
-        { base: `SELECT count(*) AS n FROM facts`, fts: `SELECT count(*) AS n FROM facts_fts` },
-        { base: `SELECT count(*) AS n FROM tasks`, fts: `SELECT count(*) AS n FROM tasks_fts` },
-        { base: `SELECT count(*) AS n FROM signals`, fts: `SELECT count(*) AS n FROM signals_fts` },
-        { base: `SELECT count(*) AS n FROM propositions WHERE status = 'active'`, fts: `SELECT count(*) AS n FROM propositions_fts` },
-      ]
-      for (const check of checks) {
-        const baseCount = Number(this.db.prepare(check.base).get()?.n ?? 0)
-        const ftsCount = Number(this.db.prepare(check.fts).get()?.n ?? 0)
-        if (baseCount !== ftsCount) return true
-      }
-      return false
-    } catch (error) {
-      logIgnoredError('needsDerivedIndexRebuild', error)
-      return true
-    }
+    return false
   }
 
   appendEpisode(entry) {
@@ -1861,118 +886,8 @@ export class MemoryStore {
     `).get(episodeId)?.day_key ?? null
   }
 
-  getProfileRecallRows(query = '', limit = 5) {
-    return getProfileRecallRowsImpl(this, query, limit)
-  }
-
-  getPolicyRecallRows(query = '', limit = 5, options = {}) {
-    return getPolicyRecallRowsImpl(this, query, limit, options)
-  }
-
-  getEntityRecallRows(query = '', limit = 5) {
-    return getEntityRecallRowsImpl(this, query, limit)
-  }
-
-  getRelationRecallRows(query = '', limit = 5) {
-    return getRelationRecallRowsImpl(this, query, limit)
-  }
-
-  async verifyMemoryClaim(query, options = {}) {
-    return verifyMemoryClaimImpl(this, query, options)
-  }
-
-  getFactRecallRowById(factId) {
-    return this.db.prepare(`
-      SELECT 'fact' AS type, f.fact_type AS subtype, CAST(f.id AS TEXT) AS ref, f.workstream AS workstream, f.text AS content,
-             0 AS score, unixepoch(f.last_seen) AS updated_at, f.id AS entity_id,
-             f.confidence AS quality_score, f.retrieval_count AS retrieval_count,
-             f.source_episode_id AS source_episode_id,
-             e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend
-      FROM facts f
-      LEFT JOIN episodes e ON e.id = f.source_episode_id
-      WHERE f.id = ? AND f.status = 'active'
-    `).get(factId)
-  }
-
-  async applyVerifiedFactCorrection(query, results = [], options = {}) {
-    if (!query || results.length === 0) return results
-    const primaryIntent = options.intent?.primary ?? 'decision'
-    const operationalIssueCue =
-      /\b(channel|discord|binding|sync|inbound|access config|channel id|message|delay|lag|restart|resume|session|restore|mapping)\b/.test(String(query).toLowerCase()) ||
-      /채널|디스코드|바인딩|동기|인바운드|채널 ?id|채널아이디|메세지|메시지|지연|리스타트|재시작|리쥼|세션|복원|매핑/.test(String(query))
-    const topType = String(results[0]?.type ?? '')
-    const shouldVerify = topType === 'task' || primaryIntent === 'decision' || primaryIntent === 'policy' || primaryIntent === 'profile'
-    if (!shouldVerify) return results
-
-    const matches = await this.verifyMemoryClaim(query, {
-      limit: 2,
-      queryVector: options.queryVector ?? null,
-      ftsQuery: buildFtsQuery(query),
-    })
-    const best = matches[0]
-    const correctionAccepted =
-      best &&
-      (
-        best.accepted ||
-        Boolean(best.literal_match) ||
-        Number(best.lexical_overlap ?? 0) >= 0.6 ||
-        (
-          Number(best.lexical_overlap ?? 0) >= 0.4 &&
-          Number(best.similarity ?? 0) >= 0.35
-        )
-      )
-    if (!correctionAccepted) return results
-
-    const existing = results.find(item => item.type === 'fact' && Number(item.entity_id) === Number(best.id))
-    const factRow = existing ?? this.getFactRecallRowById(best.id)
-    if (!factRow) return results
-    const factSubtype = String(factRow?.subtype ?? factRow?.fact_type ?? '').toLowerCase()
-    if (primaryIntent === 'task' && factSubtype && factSubtype !== 'decision' && factSubtype !== 'constraint') {
-      return results
-    }
-    if (operationalIssueCue && factSubtype === 'preference') {
-      return results
-    }
-
-    const queryTokenCount = Math.max(1, tokenizeMemoryText(query).length)
-    const overlapCount = Math.max(
-      Number(factRow.overlapCount ?? 0),
-      Math.round(Number(best.lexical_overlap ?? 0) * queryTokenCount),
-    )
-    const topScore = Number(results[0]?.weighted_score ?? 0)
-    const verifiedMargin = 0.28 + Number(best.verify_score ?? 0) * 0.24
-    const correctedScore = Number.isFinite(topScore)
-      ? Math.min(Number(factRow.weighted_score ?? topScore), topScore - verifiedMargin)
-      : Number(factRow.weighted_score ?? -verifiedMargin)
-    const corrected = {
-      ...factRow,
-      overlapCount,
-      verify_score: Number(best.verify_score ?? 0),
-      lexical_overlap: Number(best.lexical_overlap ?? 0),
-      literal_match: Boolean(best.literal_match),
-      weighted_score: correctedScore,
-      rerank_score: Math.min(Number(factRow.rerank_score ?? correctedScore), correctedScore),
-    }
-
-    if (
-      topType !== 'task' &&
-      topType !== 'profile' &&
-      !Boolean(best.literal_match) &&
-      Number(best.verify_score ?? 0) < 0.84
-    ) {
-      return results
-    }
-
-    const remaining = results.filter(item => !(item.type === 'fact' && Number(item.entity_id) === Number(best.id)))
-    return [corrected, ...remaining].slice(0, Math.max(1, Number(options.limit ?? results.length)))
-  }
-
   async getEpisodeRecallRows(options = {}) {
     return getEpisodeRecallRowsImpl(this, options)
-  }
-
-  async bulkVerifyHints(hints = [], options = {}) {
-    return bulkVerifyHintsImpl(this, hints, options)
   }
 
   getRecallShortcutRows(kind = 'all', limit = 5, options = {}) {
@@ -2061,416 +976,58 @@ export class MemoryStore {
     this.upsertDocumentStmt.run(kind, docKey, clean)
   }
 
-  upsertProfiles(profiles = [], seenAt = null, sourceEpisodeId = null) {
-    for (const profile of profiles) {
-      const key = normalizeProfileKey(profile?.key)
-      const value = cleanMemoryText(profile?.value)
-      const confidence = Number(profile?.confidence ?? 0.6)
-      if (!shouldKeepProfileValue(key, value)) continue
-      this.upsertProfileStmt.run(key, value, confidence, seenAt, seenAt, sourceEpisodeId)
-    }
-  }
-
-  projectTaskState(taskId) {
-    const events = this.getTaskEventsStmt.all(taskId)
-    if (!events.length) return null
-
-    let stage = 'planned'
-    let evidenceLevel = 'claimed'
-    let status = 'active'
-    let bestStageRank = taskStageRank(stage)
-    let bestEvidenceRank = taskEvidenceRank(evidenceLevel)
-
-    for (const event of events) {
-      const nextStage = normalizeTaskStage(event.stage, event.note ?? '')
-      const nextEvidence = normalizeEvidenceLevel(event.evidence_level, event.note ?? '')
-      const nextStatus = normalizeTaskStatus(event.status, event.note ?? '')
-
-      const stageRank = taskStageRank(nextStage)
-      if (stageRank >= bestStageRank) {
-        bestStageRank = stageRank
-        stage = nextStage
-      }
-
-      const evidenceRank = taskEvidenceRank(nextEvidence)
-      if (evidenceRank >= bestEvidenceRank) {
-        bestEvidenceRank = evidenceRank
-        evidenceLevel = nextEvidence
-      }
-
-      status = nextStatus
-    }
-
-    if (stage === 'done') status = 'done'
-    return { stage, evidenceLevel, status }
-  }
-
-  async upsertFacts(facts = [], seenAt = null, sourceEpisodeId = null, options = {}) {
-    const deprecateOnHighSimilarity = Boolean(options.deprecateOnHighSimilarity)
-    for (const fact of facts) {
-      const text = cleanMemoryText(fact?.text)
-      const factType = normalizeFactType(fact?.type)
-      const confidence = Number(fact?.confidence ?? 0.6)
-      if (!text || !factType || !shouldKeepFact(factType, text, confidence)) continue
-      const slot = normalizeFactSlot(fact?.slot)
-      const workstream = normalizeWorkstream(fact?.workstream)
-      const claimKey = deriveClaimKey(factType, slot, text, workstream)
-
-      // Semantic dedup: check if a similar active fact already exists
-      const existingExact = this.getFactIdStmt.get(factType, text)
-      const existingByKey = !existingExact && claimKey ? this.getFactRowByClaimKeyStmt.get(factType, claimKey) : null
-      if (existingByKey?.id) {
-        this.updateFactByIdStmt.run(
-          slot || null,
-          claimKey || null,
-          workstream || null,
-          text,
-          confidence,
-          seenAt,
-          sourceEpisodeId,
-          existingByKey.id,
-        )
-        this.deleteFactFtsStmt.run(existingByKey.id)
-        this.insertFactFtsStmt.run(existingByKey.id, text)
-        this.linkMemoryToEntities(text, 'fact', existingByKey.id, sourceEpisodeId)
-        this.upsertPropositions([
-          {
-            subjectKey: fact?.subject_key,
-            propositionKind: propositionKindForFact(factType, slot),
-            text,
-            occurredOn: extractExplicitDate(text),
-            confidence,
-          },
-        ], seenAt, sourceEpisodeId, existingByKey.id)
-        if (slot) this.staleFactSlotStmt.run(slot, text)
-        continue
-      }
-      if (!existingExact) {
-        const newVector = await embedText(text)
-        if (Array.isArray(newVector) && newVector.length > 0) {
-          const samTypeFacts = this.db.prepare(`
-            SELECT f.id, f.text, f.confidence, mv.vector_json
-            FROM facts f
-            JOIN memory_vectors mv ON mv.entity_type = 'fact' AND mv.entity_id = f.id
-            WHERE f.fact_type = ? AND f.status = 'active'
-          `).all(factType)
-
-          let merged = false
-          for (const existing of samTypeFacts) {
-            try {
-              const existingVector = JSON.parse(existing.vector_json)
-              if (!Array.isArray(existingVector) || existingVector.length !== newVector.length) continue
-              const similarity = cosineSimilarity(newVector, existingVector)
-              if (similarity >= 0.85) {
-                if (deprecateOnHighSimilarity) {
-                  // Deprecate mode: mark old fact as deprecated, insert new one below
-                  this.db.prepare(`UPDATE facts SET status = 'deprecated', superseded_by = NULL WHERE id = ?`).run(existing.id)
-                } else {
-                  // Merge: update existing fact if new one has higher confidence, bump mention
-                  if (confidence > existing.confidence) {
-                    this.db.prepare(`
-                      UPDATE facts SET text = ?, confidence = ?, last_seen = ?, source_episode_id = COALESCE(?, source_episode_id), mention_count = mention_count + 1
-                      WHERE id = ?
-                    `).run(text, confidence, seenAt, sourceEpisodeId, existing.id)
-                    this.deleteFactFtsStmt.run(existing.id)
-                    this.insertFactFtsStmt.run(existing.id, text)
-                  } else {
-                    this.db.prepare(`
-                      UPDATE facts SET last_seen = ?, mention_count = mention_count + 1
-                      WHERE id = ?
-                    `).run(seenAt, existing.id)
-                  }
-                  merged = true
-                  break
-                }
-              }
-            } catch { /* ignore parse errors */ }
-          }
-          if (merged) continue
-        }
-      }
-
-      this.reviveFactsStmt.run(factType, text)
-      this.upsertFactStmt.run(
-        factType,
-        slot || null,
-        claimKey || null,
-        workstream || null,
-        text,
+  upsertClassifications(rows = [], seenAt = null, sourceEpisodeId = null) {
+    const ts = seenAt || localNow()
+    const dayKey = localDateStr(new Date(ts))
+    for (const row of rows) {
+      const episodeId = Number(row?.episode_id ?? sourceEpisodeId ?? 0)
+      if (!Number.isFinite(episodeId) || episodeId <= 0) continue
+      const classification = cleanMemoryText(row?.classification)
+      const topic = cleanMemoryText(row?.topic)
+      const element = cleanMemoryText(row?.element)
+      const state = cleanMemoryText(row?.state)
+      const confidence = Number(row?.confidence ?? 0.6)
+      if (!classification || !topic || !element) continue
+      this.upsertClassificationStmt.run(
+        episodeId,
+        ts,
+        dayKey,
+        classification,
+        topic,
+        element,
+        state || null,
         confidence,
-        seenAt,
-        seenAt,
-        sourceEpisodeId,
       )
-      const row = (claimKey ? this.getFactIdByClaimKeyStmt.get(factType, claimKey) : null) ?? this.getFactIdStmt.get(factType, text)
-      if (row?.id) {
-        this.deleteFactFtsStmt.run(row.id)
-        this.insertFactFtsStmt.run(row.id, text)
-        this.linkMemoryToEntities(text, 'fact', row.id, sourceEpisodeId)
-        this.upsertPropositions([
-          {
-            subjectKey: fact?.subject_key,
-            propositionKind: propositionKindForFact(factType, slot),
-            text,
-            occurredOn: extractExplicitDate(text),
-            confidence,
-          },
-        ], seenAt, sourceEpisodeId, row.id)
-      }
-      if (slot) {
-        this.staleFactSlotStmt.run(slot, text)
-      } else if (row?.id) {
-        // Contradiction detection for slot-less facts:
-        // Reuse existing vectors (no extra embedText call) to find similar facts and supersede
-        try {
-          const newVecRow = this.getVectorStmt.get('fact', row.id, getEmbeddingModelId())
-          if (newVecRow?.vector_json) {
-            const newVector = JSON.parse(newVecRow.vector_json)
-            const sameFacts = this.db.prepare(`
-              SELECT f.id, f.text, mv.vector_json
-              FROM facts f
-              JOIN memory_vectors mv ON mv.entity_type = 'fact' AND mv.entity_id = f.id AND mv.model = ?
-              WHERE f.fact_type = ? AND f.status = 'active' AND f.id != ?
-            `).all(getEmbeddingModelId(), factType, row.id)
-            for (const old of sameFacts) {
-              try {
-                const oldVector = JSON.parse(old.vector_json)
-                const sim = cosineSimilarity(newVector, oldVector)
-                if (sim > 0.75 && old.text !== text) {
-                  this.db.prepare(`UPDATE facts SET status = 'superseded', superseded_by = ? WHERE id = ?`).run(row.id, old.id)
-                }
-              } catch {}
-            }
-          }
-        } catch {}
-      }
-      const profileKey = profileKeyForFact(factType, text, slot)
-      if (profileKey) {
-        this.upsertProfileStmt.run(profileKey, text, confidence, seenAt, seenAt, sourceEpisodeId)
-      }
-    }
-    for (const kind of ['decision', 'preference', 'constraint', 'fact']) {
-      this.markFactsStaleStmt.run(kind, staleCutoffDays(kind))
-    }
-  }
-
-  upsertTasks(tasks = [], seenAt = null, sourceEpisodeId = null) {
-    for (const task of tasks) {
-      const title = cleanMemoryText(task?.title)
-      if (!title) continue
-      const details = composeTaskDetails({
-        ...task,
-        scope: task?.scope ?? inferTaskScope(task),
-        activity: task?.activity ?? inferTaskActivity(task),
-      })
-      const workstream = normalizeWorkstream(task?.workstream)
-      const taskKey = deriveTaskKey(title, workstream)
-      const stage = normalizeTaskStage(task?.stage, details)
-      const evidenceLevel = normalizeEvidenceLevel(task?.evidence_level, details)
-      const prev = this.getTaskRowByKeyStmt.get(taskKey) ?? this.getTaskRowStmt.get(title)
-      if (prev?.id && prev.title && prev.title !== title) {
-        this.updateTaskByIdStmt.run(
-          title,
-          taskKey,
-          details || null,
-          workstream || null,
-          stage,
-          evidenceLevel,
-          normalizeTaskStatus(task?.status, details),
-          normalizeTaskPriority(task?.priority),
-          Number(task?.confidence ?? 0.6),
-          seenAt,
-          sourceEpisodeId,
-          prev.id,
-        )
-        this.deleteTaskFtsStmt.run(prev.id)
-        this.insertTaskFtsStmt.run(prev.id, title, details)
-        this.linkMemoryToEntities(`${title} ${details ?? ''}`, 'task', prev.id, sourceEpisodeId)
-        this.insertTaskEventStmt.run(
-          prev.id,
-          seenAt,
-          'projection_update',
-          stage,
-          evidenceLevel,
-          normalizeTaskStatus(task?.status, details),
-          details || null,
-          sourceEpisodeId,
-        )
-        continue
-      }
-      this.upsertTaskStmt.run(
-        title,
-        taskKey,
-        details || null,
-        workstream || null,
-        stage,
-        evidenceLevel,
-        normalizeTaskStatus(task?.status, details),
-        normalizeTaskPriority(task?.priority),
-        Number(task?.confidence ?? 0.6),
-        seenAt,
-        seenAt,
-        sourceEpisodeId,
-      )
-      const row = this.getTaskIdByKeyStmt.get(taskKey) ?? this.getTaskIdStmt.get(title)
-      if (row?.id) {
-        this.deleteTaskFtsStmt.run(row.id)
-        this.insertTaskFtsStmt.run(row.id, title, details)
-        this.linkMemoryToEntities(`${title} ${details ?? ''}`, 'task', row.id, sourceEpisodeId)
-        const changed =
-          !prev ||
-          prev.status !== normalizeTaskStatus(task?.status, details) ||
-          prev.stage !== stage ||
-          prev.evidence_level !== evidenceLevel
-        if (changed) {
-          this.insertTaskEventStmt.run(
-            row.id,
-            seenAt ?? localNow(),
-            prev ? 'state_update' : 'task_created',
-            stage,
-            evidenceLevel,
-            normalizeTaskStatus(task?.status, details),
-            details || null,
-            sourceEpisodeId,
-          )
-          const projected = this.projectTaskState(row.id)
-          if (projected) {
-            this.updateTaskProjectionStmt.run(projected.stage, projected.evidenceLevel, projected.status, row.id)
-          }
-        }
-      }
-    }
-    this.markTasksStaleStmt.run()
-  }
-
-  replaceInterests(interests = []) {
-    this.clearInterestsStmt.run()
-    for (const item of interests) {
-      if (!item?.name) continue
-      this.insertInterestStmt.run(
-        String(item.name).trim(),
-        Number(item.score ?? item.count ?? 1),
-        Number(item.count ?? Math.max(1, Math.round(Number(item.score ?? 1) * 10))),
-        item.last_seen ?? item.last ?? null,
-      )
-    }
-  }
-
-  upsertSignals(signals = [], sourceEpisodeId = null, seenAt = null) {
-    const seenKeys = new Set()
-    for (const signal of signals) {
-      if (!signal?.kind || !signal?.value) continue
-      const kind = normalizeSignalKind(signal.kind)
-      const value = String(signal.value).trim()
-      const normalizedValue = cleanMemoryText(value)
-      const score = Number(signal.score ?? 0.5)
-      if (!shouldKeepSignal(kind, normalizedValue, score)) continue
-      if (!normalizedValue) continue
-      const dedupeKey = `${kind}:${normalizedValue.toLowerCase()}`
-      if (seenKeys.has(dedupeKey)) continue
-      seenKeys.add(dedupeKey)
-      this.upsertSignalStmt.run(
-        kind,
-        normalizedValue,
-        score,
-        seenAt,
-        seenAt,
-        sourceEpisodeId,
-      )
-      const row = this.getSignalIdStmt.get(kind, normalizedValue)
-      if (row?.id) {
-        this.deleteSignalFtsStmt.run(row.id)
-        this.insertSignalFtsStmt.run(row.id, kind, normalizedValue)
-      }
-      const profileKey = profileKeyForSignal(kind, normalizedValue)
-      if (profileKey) {
-        this.upsertProfileStmt.run(profileKey, normalizedValue, score, seenAt, seenAt, sourceEpisodeId)
-      }
-    }
-  }
-
-  upsertEntities(entities = [], seenAt = null, sourceEpisodeId = null) {
-    for (const entity of entities) {
-      const name = cleanMemoryText(entity?.name)
-      const entityType = String(entity?.type ?? 'thing').toLowerCase().trim()
-      const description = cleanMemoryText(entity?.description ?? '')
-      if (!name || name.length < 2) continue
+      const id = this.getClassificationByEpisodeStmt.get(episodeId)?.id
+      if (!id) continue
+      try { this.deleteClassificationFtsStmt.run(id) } catch {}
       try {
-        this.db.prepare(`
-          INSERT INTO entities (name, entity_type, description, first_seen, last_seen, source_episode_id)
-          VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(name, entity_type) DO UPDATE SET
-            description = COALESCE(excluded.description, entities.description),
-            last_seen = excluded.last_seen,
-            source_episode_id = COALESCE(excluded.source_episode_id, entities.source_episode_id)
-        `).run(name, entityType, description || null, seenAt, seenAt, sourceEpisodeId)
+        this.insertClassificationFtsStmt.run(
+          id,
+          classification,
+          topic,
+          element,
+          state || '',
+        )
       } catch {}
     }
   }
 
-  upsertRelations(relations = [], seenAt = null, sourceEpisodeId = null) {
-    for (const rel of relations) {
-      const sourceName = cleanMemoryText(rel?.source)
-      const targetName = cleanMemoryText(rel?.target)
-      const relType = String(rel?.type ?? 'related_to').toLowerCase().trim()
-      const description = cleanMemoryText(rel?.description ?? '')
-      const confidence = Number(rel?.confidence ?? 0.7)
-      if (!sourceName || !targetName || sourceName.length < 2 || targetName.length < 2) continue
-      try {
-        const sourceEntity = this.db.prepare('SELECT id FROM entities WHERE name = ?').get(sourceName)
-        const targetEntity = this.db.prepare('SELECT id FROM entities WHERE name = ?').get(targetName)
-        if (!sourceEntity || !targetEntity) continue
-        this.db.prepare(`
-          INSERT INTO relations (source_entity_id, target_entity_id, relation_type, description, confidence, first_seen, last_seen, source_episode_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(source_entity_id, target_entity_id, relation_type) DO UPDATE SET
-            description = COALESCE(excluded.description, relations.description),
-            confidence = MAX(relations.confidence, excluded.confidence),
-            last_seen = excluded.last_seen,
-            source_episode_id = COALESCE(excluded.source_episode_id, relations.source_episode_id)
-        `).run(sourceEntity.id, targetEntity.id, relType, description || null, confidence, seenAt, seenAt, sourceEpisodeId)
-      } catch {}
-    }
-  }
-
-  getEntityGraph(entityName) {
-    const entity = this.db.prepare('SELECT * FROM entities WHERE name = ?').get(entityName)
-    if (!entity) return null
-    const outgoing = this.db.prepare(`
-      SELECT r.relation_type, e.name AS target, e.entity_type AS target_type, r.description, r.confidence
-      FROM relations r JOIN entities e ON e.id = r.target_entity_id
-      WHERE r.source_entity_id = ? AND r.status = 'active'
-    `).all(entity.id)
-    const incoming = this.db.prepare(`
-      SELECT r.relation_type, e.name AS source, e.entity_type AS source_type, r.description, r.confidence
-      FROM relations r JOIN entities e ON e.id = r.source_entity_id
-      WHERE r.target_entity_id = ? AND r.status = 'active'
-    `).all(entity.id)
-    return { entity, outgoing, incoming }
+  getClassificationRows(limit = 12) {
+    return this.db.prepare(`
+      SELECT c.id, c.episode_id, c.classification, c.topic, c.element, c.state,
+             c.confidence, c.day_key, c.ts, c.updated_at, c.retrieval_count,
+             e.content AS episode_content
+      FROM classifications c
+      LEFT JOIN episodes e ON e.id = c.episode_id
+      WHERE c.status = 'active'
+      ORDER BY c.updated_at DESC, c.id DESC
+      LIMIT ?
+    `).all(Math.max(1, Number(limit ?? 12)))
   }
 
   syncHistoryFromFiles() {
     ensureDir(this.historyDir)
-
-    for (const docKey of ['identity', 'ongoing', 'context']) {
-      const filePath = join(this.historyDir, `${docKey}.md`)
-      if (!existsSync(filePath)) continue
-      this.upsertDocument(docKey, docKey, readFileSync(filePath, 'utf8'))
-    }
-
-    const interestsPath = join(this.historyDir, 'interests.json')
-    if (existsSync(interestsPath)) {
-      try {
-        const parsed = JSON.parse(readFileSync(interestsPath, 'utf8'))
-        const items = Object.entries(parsed).map(([name, value]) => ({
-          name,
-          score: typeof value?.count === 'number' ? value.count : 1,
-          count: typeof value?.count === 'number' ? value.count : 1,
-          last_seen: value?.last ?? null,
-        }))
-        this.replaceInterests(items)
-      } catch { /* ignore malformed interests */ }
-    }
   }
 
   backfillProject(workspacePath, options = {}) {
@@ -2527,77 +1084,28 @@ export class MemoryStore {
   buildContextText() {
     const parts = []
 
+    const classifications = this.getClassificationRows(12)
+    if (classifications.length > 0) {
+      const lines = classifications.map(row => {
+        const fields = [
+          `분류=${row.classification}`,
+          `주제=${row.topic}`,
+          `요소=${row.element}`,
+          row.state ? `상태=${row.state}` : null,
+        ].filter(Boolean)
+        return `- ${fields.join(' | ')}`
+      })
+      parts.push(`## Long-Term Memory\n${lines.join('\n')}`)
+    }
+
     // ## Bot — bot.md + tone/style signals
     const botMdPath = join(this.dataDir, 'bot.md')
     let botContent = ''
     try { botContent = readFileSync(botMdPath, 'utf8').trim() } catch {}
-    const toneSignals = this.db.prepare(`
-      SELECT kind, value, score FROM signals
-      WHERE kind IN ('tone', 'response_style', 'personality') AND status = 'active'
-      ORDER BY score DESC LIMIT 3
-    `).all()
-    if (botContent || toneSignals.length) {
+    if (botContent) {
       parts.push('## Bot')
       if (botContent) parts.push(botContent)
-      if (toneSignals.length) {
-        const seen = new Set()
-        const dedupedSignals = toneSignals.filter(s => {
-          if (seen.has(s.kind)) return false
-          seen.add(s.kind)
-          return true
-        })
-        parts.push(dedupedSignals.map(s => `- ${s.kind}: ${s.value}`).join('\n'))
-      }
     }
-
-    // ## User — profiles DB
-    const profiles = this.db.prepare(`
-      SELECT key, value, confidence FROM profiles
-      WHERE status = 'active'
-      ORDER BY confidence DESC LIMIT 10
-    `).all().filter(profile => shouldKeepProfileValue(profile.key, profile.value))
-    if (profiles.length) {
-      parts.push(`## User\n${profiles.map(p => `- ${p.key}: ${p.value}`).join('\n')}`)
-    }
-
-    // ## Core Memory — preference/constraint facts
-    const coreFacts = this.db.prepare(`
-      SELECT fact_type, text
-      FROM facts
-      WHERE status = 'active'
-        AND fact_type IN ('preference', 'constraint')
-      ORDER BY confidence DESC, retrieval_count DESC, mention_count DESC, last_seen DESC
-      LIMIT 6
-    `).all()
-    if (coreFacts.length > 0) {
-      parts.push(`## Core Memory\n${coreFacts.map(item => `- [${item.fact_type}] ${item.text}`).join('\n')}`)
-    }
-
-    // ## Decisions — decision/fact facts
-    const durableFacts = this.db.prepare(`
-      SELECT fact_type, text
-      FROM facts
-      WHERE status = 'active'
-        AND fact_type IN ('decision', 'fact')
-      ORDER BY confidence DESC, retrieval_count DESC, mention_count DESC, last_seen DESC
-      LIMIT 6
-    `).all()
-    if (durableFacts.length > 0) {
-      const grouped = new Map()
-      for (const row of durableFacts) {
-        const bucket = grouped.get(row.fact_type) ?? []
-        bucket.push(row)
-        grouped.set(row.fact_type, bucket)
-      }
-      const lines = []
-      for (const [factType, values] of grouped.entries()) {
-        const label = factType[0].toUpperCase() + factType.slice(1)
-        lines.push(`### ${label}\n${values.map(value => `- ${value.text}`).join('\n')}`)
-      }
-      parts.push(`## Decisions\n${lines.join('\n\n')}`)
-    }
-
-    // Ongoing/Dev Worklog/Signals/Recent removed — real-time buildInboundMemoryContext handles these per-turn
 
     // Fallback — all sections empty → recent dialogues
     if (parts.length === 0) {
@@ -2647,77 +1155,20 @@ export class MemoryStore {
       : Math.max(1, Number(options.perTypeLimit ?? 64))
     const items = []
 
-    const factRows = this.db.prepare(`
-      SELECT id, fact_type AS subtype, slot, workstream, text AS content
-      FROM facts
+    const classificationRows = this.db.prepare(`
+      SELECT id, classification, topic, element, state
+      FROM classifications
       WHERE status = 'active'
-      ORDER BY last_seen DESC, id DESC
+      ORDER BY updated_at DESC, id DESC
       LIMIT ?
-    `).all(perTypeLimit)
-    for (const row of factRows) {
+    `).all(Math.max(8, Math.floor(perTypeLimit / 2)))
+    for (const row of classificationRows) {
       items.push({
-        key: embeddingItemKey('fact', row.id),
-        entityType: 'fact',
+        key: embeddingItemKey('classification', row.id),
+        entityType: 'classification',
         entityId: row.id,
-        subtype: row.subtype,
-        slot: row.slot,
-        workstream: row.workstream,
-        content: row.content,
-      })
-    }
-
-    const taskRows = this.db.prepare(`
-      SELECT id, status, priority, stage, evidence_level, workstream,
-             trim(title || CASE WHEN details IS NOT NULL AND details != '' THEN ' — ' || details ELSE '' END) AS content
-      FROM tasks
-      WHERE status IN ('active', 'in_progress', 'paused')
-      ORDER BY last_seen DESC, id DESC
-      LIMIT ?
-    `).all(perTypeLimit)
-    for (const row of taskRows) {
-      items.push({
-        key: embeddingItemKey('task', row.id),
-        entityType: 'task',
-        entityId: row.id,
-        status: row.status,
-        priority: row.priority,
-        stage: row.stage,
-        evidenceLevel: row.evidence_level,
-        workstream: row.workstream,
-        content: row.content,
-      })
-    }
-
-    const signalRows = this.db.prepare(`
-      SELECT id, kind AS subtype, value AS content
-      FROM signals
-      ORDER BY last_seen DESC, id DESC
-      LIMIT ?
-    `).all(Math.max(8, Math.floor(perTypeLimit * 0.75)))
-    for (const row of signalRows) {
-      items.push({
-        key: embeddingItemKey('signal', row.id),
-        entityType: 'signal',
-        entityId: row.id,
-        subtype: row.subtype,
-        content: row.content,
-      })
-    }
-
-    const propositionRows = this.db.prepare(`
-      SELECT id, proposition_kind AS subtype, text AS content
-      FROM propositions
-      WHERE status = 'active'
-      ORDER BY last_seen DESC, id DESC
-      LIMIT ?
-    `).all(Math.max(8, Math.floor(perTypeLimit * 0.75)))
-    for (const row of propositionRows) {
-      items.push({
-        key: embeddingItemKey('proposition', row.id),
-        entityType: 'proposition',
-        entityId: row.id,
-        subtype: row.subtype,
-        content: row.content,
+        subtype: row.classification,
+        content: [row.classification, row.topic, row.element, row.state].filter(Boolean).join(' | '),
       })
     }
 
@@ -2743,45 +1194,6 @@ export class MemoryStore {
         entityId: row.id,
         subtype: row.subtype,
         ref: row.ref,
-        content: row.content,
-      })
-    }
-
-    // Entity embeddings
-    const entityRows = this.db.prepare(`
-      SELECT id, entity_type AS subtype,
-             trim(name || CASE WHEN description IS NOT NULL AND description != '' THEN ' — ' || description ELSE '' END) AS content
-      FROM entities
-      ORDER BY last_seen DESC, id DESC
-      LIMIT ?
-    `).all(Math.max(8, Math.floor(perTypeLimit / 2)))
-    for (const row of entityRows) {
-      items.push({
-        key: embeddingItemKey('entity', row.id),
-        entityType: 'entity',
-        entityId: row.id,
-        subtype: row.subtype,
-        content: row.content,
-      })
-    }
-
-    // Relation embeddings
-    const relationRows = this.db.prepare(`
-      SELECT r.id, r.relation_type AS subtype,
-             trim(se.name || ' -> ' || te.name || CASE WHEN r.description IS NOT NULL AND r.description != '' THEN ' — ' || r.description ELSE '' END) AS content
-      FROM relations r
-      JOIN entities se ON se.id = r.source_entity_id
-      JOIN entities te ON te.id = r.target_entity_id
-      WHERE r.status = 'active'
-      ORDER BY r.confidence DESC, r.last_seen DESC, r.id DESC
-      LIMIT ?
-    `).all(Math.max(8, Math.floor(perTypeLimit / 2)))
-    for (const row of relationRows) {
-      items.push({
-        key: embeddingItemKey('relation', row.id),
-        entityType: 'relation',
-        entityId: row.id,
-        subtype: row.subtype,
         content: row.content,
       })
     }
@@ -2846,12 +1258,12 @@ export class MemoryStore {
 
   _vecRowId(entityType, entityId) {
     // Pack entity type + id into a single integer rowid (100M ceiling per type)
-    const typePrefix = { fact: 1, task: 2, signal: 3, episode: 4, proposition: 5, entity: 6, relation: 7 }
+    const typePrefix = { fact: 1, task: 2, signal: 3, episode: 4, proposition: 5, entity: 6, relation: 7, classification: 8 }
     return (typePrefix[entityType] ?? 9) * 100000000 + Number(entityId)
   }
 
   _vecRowToEntity(rowid) {
-    const typeMap = { 1: 'fact', 2: 'task', 3: 'signal', 4: 'episode', 5: 'proposition', 6: 'entity', 7: 'relation' }
+    const typeMap = { 1: 'fact', 2: 'task', 3: 'signal', 4: 'episode', 5: 'proposition', 6: 'entity', 7: 'relation', 8: 'classification' }
     const typeNum = Math.floor(rowid / 100000000)
     return { entityType: typeMap[typeNum] ?? 'unknown', entityId: rowid % 100000000 }
   }
@@ -2932,17 +1344,6 @@ export class MemoryStore {
       scores.event = Math.max(0, scores.event - 0.18)
     }
     const profileSlot = detectProfileQuerySlot(clean)
-    const scopedEntities = this.resolveQueryEntityScope(clean)
-    if (scopedEntities.length >= 2) {
-      scores.decision = Number((scores.decision + 0.34).toFixed(4))
-      scores.profile = Math.max(0, scores.profile - 0.12)
-      scores.security = Math.max(0, scores.security - 0.1)
-      scores.task = Math.max(0, scores.task - 0.08)
-    } else if (scopedEntities.length === 1 && isRelationQuery(clean)) {
-      scores.decision = Number((scores.decision + 0.18).toFixed(4))
-      scores.profile = Math.max(0, scores.profile - 0.08)
-      scores.security = Math.max(0, scores.security - 0.08)
-    }
 
     const temporal = parseTemporalHint(clean)
     if (temporal) {
@@ -2977,23 +1378,16 @@ export class MemoryStore {
     }
 
     const rankedIntents = Object.entries(scores).sort((a, b) => b[1] - a[1])
-    let primary = rankedIntents[0]?.[0] ?? 'decision'
     const topScore = Number(rankedIntents[0]?.[1] ?? 0)
     const secondScore = Number(rankedIntents[1]?.[1] ?? 0)
     const topScoreMin = Number(tuning?.intent?.topScoreMin ?? DEFAULT_MEMORY_TUNING.intent.topScoreMin)
     const gapMin = Number(tuning?.intent?.gapMin ?? DEFAULT_MEMORY_TUNING.intent.gapMin)
     const weakPrediction = topScore < topScoreMin || (topScore - secondScore) < gapMin
-    const hasStrongCue =
-      Boolean(profileSlot) ||
-      Boolean(temporal) ||
-      isDoneTaskQuery(clean) ||
-      isRuleQuery(clean) ||
-      isRelationQuery(clean) ||
-      /\b(task|tasks|work|working|todo|next step|in progress|current work)\b/.test(clean.toLowerCase()) ||
-      /작업|진행|진행중|할 일|할일|다음/.test(clean)
-    if (weakPrediction && !hasStrongCue) {
-      primary = 'decision'
-    }
+    const eventLike =
+      /\b(event|incident|meeting)\b/.test(clean.toLowerCase()) ||
+      /사건|이벤트|회의/.test(clean)
+    const historyLike = Boolean(temporal) || isHistoryQuery(clean)
+    const primary = historyLike ? (eventLike ? 'event' : 'history') : 'decision'
 
     return { primary, scores, topScore, secondScore, weakPrediction, devBias }
   }
@@ -3081,15 +1475,6 @@ export class MemoryStore {
       .sort((a, b) => Number(b.seedRank) - Number(a.seedRank))
   }
 
-  async getSeedResultsForIntent(intent, query = '', queryVector = null, limit = 4, options = {}) {
-    const plan = buildMemoryQueryPlan(query, { primary: intent }, {
-      limit,
-      queryEntities: Array.isArray(options.queryEntities) ? options.queryEntities : [],
-      includeDoneTasks: isDoneTaskQuery(query),
-    })
-    return getSeedResultsForPlan(this, plan, queryVector)
-  }
-
   searchRelevant(query, limit = 8) {
     const clean = cleanMemoryText(query)
     if (!clean) return []
@@ -3101,300 +1486,54 @@ export class MemoryStore {
   async searchRelevantHybrid(query, limit = 8, options = {}) {
     const clean = cleanMemoryText(query)
     if (!clean) return []
-    const stageOrder = ['intent', 'plan', 'candidates', 'combined', 'exact', 'verified', 'rerank', 'final']
-    const normalizeStage = (value) => {
-      const normalized = String(value ?? '').trim().toLowerCase()
-      return stageOrder.includes(normalized) ? normalized : null
-    }
-    const summarizeItem = (item) => ({
-      type: item?.type ?? null,
-      subtype: item?.subtype ?? null,
-      entity_id: item?.entity_id ?? null,
-      status: item?.status ?? null,
-      score: item?.score ?? item?.weighted_score ?? null,
-      weighted_score: item?.weighted_score ?? null,
-      rerank_score: item?.rerank_score ?? null,
-      overlap: item?.overlapCount ?? null,
-      content: String(item?.content ?? item?.text ?? '').slice(0, 160),
-      source_ts: item?.source_ts ?? null,
-    })
-    const summarizeItems = (items = [], maxItems = Math.max(limit, 8)) => items.slice(0, maxItems).map(summarizeItem)
-    const summarizePlan = (plan) => ({
-      retriever: plan?.retriever ?? null,
-      intent: plan?.intent?.primary ?? null,
-      includeDoneTasks: Boolean(plan?.includeDoneTasks),
-      preferActiveTasks: Boolean(plan?.preferActiveTasks),
-      explicitRelationQuery: Boolean(plan?.explicitRelationQuery),
-      preferRelations: Boolean(plan?.preferRelations),
-      isHistoryExact: Boolean(plan?.isHistoryExact),
-      temporal: plan?.temporal ?? null,
-      filters: plan?.filters ?? null,
-      entityScope: (plan?.queryEntities ?? []).map(item => ({
-        id: item.id,
-        name: item.name,
-        type: item.entity_type,
-      })),
-    })
-    const untilStage = normalizeStage(options.untilStage)
-    const shouldReturnDebug = Boolean(options.debug || untilStage)
-    const shouldReturnStageResults = Boolean(options.returnStageResults)
-    const shouldRecordRetrieval = !untilStage && options.recordRetrieval !== false
-    const tuning = options.tuning ?? this.getRetrievalTuning()
+
+    // ── Stage 1: base scores (keyword + embedding + time) ──
     const queryVector = options.queryVector ?? await embedText(clean)
-    const baseIntent = options.intent ?? await this.classifyQueryIntent(clean, queryVector, { tuning })
-    const focusVector = options.focusVector ?? await this.buildRecentFocusVector({
-      channelId: options.channelId,
-      userId: options.userId,
-    })
-    const queryEntities = options.queryEntities ?? this.resolveQueryEntityScope(clean)
-    const filters = options.filters
-    const temporal = options.temporal ?? null
-    const variants = generateQueryVariants(clean)
-    const operationalIssueCue = detectOperationalIssueQuery(clean)
-    const standaloneMemoryCue = detectStandaloneMemoryQuery(clean)
-    const debugStages = shouldReturnDebug ? {
-      intent: {
-        primary: baseIntent?.primary ?? null,
-        topScore: baseIntent?.topScore ?? null,
-        secondScore: baseIntent?.secondScore ?? null,
-        weakPrediction: Boolean(baseIntent?.weakPrediction),
-        devBias: baseIntent?.devBias ?? null,
-        scores: baseIntent?.scores ?? {},
-      },
-    } : null
-    if (untilStage === 'intent') {
-      return {
-        results: [],
-        debug: {
-          stopped_at: 'intent',
-          stages: debugStages,
-        },
+    const sparse = this.searchRelevantSparse(clean, limit * 3)
+    const dense = await this.searchRelevantDense(clean, limit * 3, queryVector, null, {})
+
+    // Merge sparse + dense, dedupe by entity_id
+    const seen = new Map()
+    for (const item of [...sparse, ...dense]) {
+      const key = `${item.type}:${item.entity_id}`
+      if (!seen.has(key)) {
+        seen.set(key, { ...item, keyword_score: 0, embedding_score: 0 })
       }
+      const merged = seen.get(key)
+      if (sparse.includes(item)) merged.keyword_score = Math.max(merged.keyword_score, Number(item.score ?? item.fts_score ?? 0.3))
+      if (dense.includes(item)) merged.embedding_score = Math.max(merged.embedding_score, Number(item.dense_score ?? item.score ?? 0.3))
     }
 
-    const runRetrievalPass = async (intent) => {
-      const plan = buildMemoryQueryPlan(clean, intent, {
-        limit,
-        temporal,
-        queryEntities,
-        filters,
-      })
-      const { sparse, dense } = await buildHybridRetrievalInputs(this, plan, queryVector, focusVector)
-      if (variants.length > 1) {
-        for (const variant of variants.slice(1)) {
-          const variantVector = await embedText(variant)
-          const variantSparse = await this.applyMetadataFilters(this.searchRelevantSparse(variant, limit), plan.filters)
-          const variantDense = await this.applyMetadataFilters(
-            await this.searchRelevantDense(variant, limit, variantVector, focusVector, {
-              includeDoneTasks: plan.includeDoneTasks,
-            }),
-            plan.filters,
-          )
-          sparse.push(...variantSparse)
-          dense.push(...variantDense)
-        }
-      }
-      const candidateRows = buildCandidateRows(clean, intent, plan, sparse, dense)
-      const combined = this.combineRetrievalResults(clean, sparse, dense, limit, intent, plan.queryEntities, {
-        graphFirst: plan.graphFirst,
-        tuning,
-        preferActiveTasks: plan.preferActiveTasks,
-      })
-      const exactResults = applyExactHistorySelection(plan, combined, limit, { tuning })
-      const finalResults = await this.applyVerifiedFactCorrection(clean, exactResults, {
-        limit,
-        intent,
-        queryVector,
-      })
-      return { intent, plan, sparse, dense, candidateRows, combined, exactResults, finalResults }
+    // ── Stage 2: apply scoring per RETRIEVAL-CLASSIFICATION-PLAN ──
+    const { computeFinalScore, getScoringConfig } = await import('./memory-score-utils.mjs')
+    const tuning = options.tuning ?? this.getRetrievalTuning()
+    const scoringConfig = getScoringConfig(tuning)
+
+    const scored = []
+    for (const [, item] of seen) {
+      const baseScore = item.keyword_score + item.embedding_score
+      const finalScore = computeFinalScore(baseScore, item, clean, { config: scoringConfig })
+      scored.push({ ...item, weighted_score: finalScore, base_score: baseScore })
     }
 
-    const basePlan = buildMemoryQueryPlan(clean, baseIntent, {
-      limit,
-      temporal,
-      queryEntities,
-      filters,
-    })
-    if (debugStages) debugStages.plan = summarizePlan(basePlan)
-    if (untilStage === 'plan') {
-      return {
-        results: [],
-        debug: {
-          stopped_at: 'plan',
-          stages: debugStages,
-        },
-      }
-    }
+    scored.sort((a, b) => b.weighted_score - a.weighted_score)
 
-    let activePass = await runRetrievalPass(baseIntent)
-    if (debugStages) {
-      debugStages.candidates = {
-        sparse_count: activePass.sparse.length,
-        dense_count: activePass.dense.length,
-        top: summarizeItems(activePass.candidateRows),
-      }
-      debugStages.combined = summarizeItems(activePass.combined)
-      debugStages.exact = summarizeItems(activePass.exactResults)
-      debugStages.verified = summarizeItems(activePass.finalResults)
-    }
-    if (untilStage === 'candidates' || untilStage === 'combined' || untilStage === 'exact' || untilStage === 'verified') {
-      const stageResults =
-        untilStage === 'candidates' ? activePass.candidateRows :
-        untilStage === 'combined' ? activePass.combined :
-        untilStage === 'exact' ? activePass.exactResults :
-        activePass.finalResults
-      return {
-        results: stageResults,
-        debug: {
-          stopped_at: untilStage,
-          stages: debugStages,
-        },
-      }
-    }
-    let finalResults = activePass.finalResults
-    let refinementDebug = {
-      attempted: false,
-      selected: false,
-      from_intent: activePass.intent.primary,
-      to_intent: null,
-      base_verified_top: summarizeItems(activePass.finalResults, 5),
-      refined_verified_top: [],
-    }
-    // Candidate-based intent refinement: if results are weak, retry with adjusted intent
-    if (finalResults.length === 0 || (finalResults.length > 0 && Number(finalResults[0]?.weighted_score ?? 0) > -0.35)) {
-      const typeDistribution = {}
-      for (const item of [...activePass.sparse, ...activePass.dense].slice(0, 20)) {
-        typeDistribution[item.type ?? 'unknown'] = (typeDistribution[item.type ?? 'unknown'] ?? 0) + 1
-      }
-      const dominantType = Object.entries(typeDistribution).sort((a, b) => b[1] - a[1])[0]?.[0]
-      const typeToIntent = { fact: 'decision', task: 'task', signal: 'profile', profile: 'profile', episode: 'history', entity: 'decision', relation: 'decision', proposition: 'decision' }
-      const refinedIntent = typeToIntent[dominantType] ?? 'decision'
-      const skipHistoryRefine = refinedIntent === 'history' && (operationalIssueCue || standaloneMemoryCue)
-      if (refinedIntent !== activePass.intent.primary && !skipHistoryRefine) {
-        refinementDebug.attempted = true
-        refinementDebug.to_intent = refinedIntent
-        try {
-          const refinedPass = await runRetrievalPass({ ...activePass.intent, primary: refinedIntent })
-          refinementDebug.refined_verified_top = summarizeItems(refinedPass.finalResults, 5)
-          const firstScore = Number(finalResults[0]?.weighted_score ?? 0)
-          const secondScore = Number(refinedPass.finalResults[0]?.weighted_score ?? 0)
-          if (refinedPass.finalResults.length > 0 && (finalResults.length === 0 || secondScore < firstScore)) {
-            activePass = refinedPass
-            finalResults = activePass.finalResults
-            refinementDebug.selected = true
-            if (debugStages) {
-              debugStages.plan = summarizePlan(activePass.plan)
-              debugStages.candidates = {
-                sparse_count: activePass.sparse.length,
-                dense_count: activePass.dense.length,
-                top: summarizeItems(activePass.candidateRows),
-              }
-              debugStages.combined = summarizeItems(activePass.combined)
-              debugStages.exact = summarizeItems(activePass.exactResults)
-              debugStages.verified = summarizeItems(activePass.finalResults)
-            }
-          }
-        } catch {}
-      }
-    }
-    // Cross-encoder rerank: only when heuristic results are weak
-    let rerankDebug = {
-      attempted: false,
-      input_top: [],
-      output_top: [],
-    }
-    const buildStageResults = () => ({
-      candidates: activePass.candidateRows,
-      combined: activePass.combined,
-      exact: activePass.exactResults,
-      verified: activePass.finalResults,
-      final: finalResults,
-    })
-    if (tuning.reranker?.enabled !== false &&
-        (finalResults.length === 0 || (finalResults.length > 0 && Number(finalResults[0]?.weighted_score ?? 0) > (tuning.reranker?.triggerThreshold ?? -0.4)))) {
+    // ── Stage 3: rerank (optional) ──
+    let finalResults = scored.slice(0, limit)
+    if (tuning.reranker?.enabled) {
       try {
         const { crossEncoderRerank } = await import('./reranker.mjs')
-        const pool = collapseClaimSurfaceDuplicates([
-          ...finalResults,
-          ...activePass.exactResults,
-        ], 'weighted_score').slice(0, Math.max(limit, tuning.reranker?.maxCandidates ?? 5))
-        if (pool.length > 0) {
-          rerankDebug.attempted = true
-          rerankDebug.input_top = summarizeItems(pool)
-          const maxCandidates = tuning.reranker?.maxCandidates ?? 5
-          const minScore = tuning.reranker?.minRerankerScore ?? -2
-          const reranked = await crossEncoderRerank(clean, pool, { limit: maxCandidates })
-          rerankDebug.output_top = summarizeItems(reranked)
-          if (reranked.length > 0 && reranked[0].reranker_score > minScore) {
-            // Only adopt reranked results if top item improves or stays same
-            const prevTopId = Number(finalResults[0]?.entity_id ?? 0)
-            const rerankedTopId = Number(reranked[0]?.entity_id ?? 0)
+        const reranked = await crossEncoderRerank(clean, finalResults, { limit })
+        if (reranked.length > 0) finalResults = reranked
+      } catch {}
+    }
 
-            const rerankedTopCE = Number(reranked[0]?.reranker_score ?? -Infinity)
-            // Accept if: same top item, or reranker is very confident (score > 0)
-            if (prevTopId === rerankedTopId || rerankedTopCE > 0) {
-              finalResults = reranked.slice(0, limit)
-            }
-          }
-        }
-      } catch {} // reranker load/inference failure — use heuristic results
-    }
-    if (debugStages) {
-      debugStages.refinement = refinementDebug
-      debugStages.rerank = rerankDebug
-      debugStages.final = summarizeItems(finalResults)
-    }
-    if (untilStage === 'rerank') {
-      return {
-        results: finalResults,
-        stage_results: shouldReturnStageResults ? buildStageResults() : undefined,
-        debug: {
-          stopped_at: 'rerank',
-          stages: debugStages,
-        },
-      }
-    }
-    if (shouldRecordRetrieval) this.recordRetrieval(finalResults)
-    let debugSummary = null
-    let traceId = ''
-    if (options.trace || options.debug) {
-      debugSummary = summarizeRetrieverDebug(activePass.plan, activePass.sparse, activePass.dense, finalResults)
-      traceId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      this.appendRetrievalTrace({
-        trace_id: traceId,
-        ts: localNow(),
-        query: clean,
-        debug: debugSummary,
-      })
-    }
+    if (options.recordRetrieval !== false) this.recordRetrieval(finalResults)
+
     if (options.debug) {
       return {
         results: finalResults,
-        stage_results: shouldReturnStageResults ? buildStageResults() : undefined,
-        debug: {
-          trace_id: traceId,
-          stopped_at: untilStage ?? 'final',
-          stages: debugStages,
-          ...debugSummary,
-        },
-      }
-    }
-    if (shouldReturnStageResults) {
-      return {
-        results: finalResults,
-        stage_results: buildStageResults(),
-      }
-    }
-    if (untilStage) {
-      return {
-        results: finalResults,
-        stage_results: shouldReturnStageResults ? buildStageResults() : undefined,
-        debug: {
-          trace_id: traceId,
-          stopped_at: untilStage,
-          stages: debugStages,
-          ...debugSummary,
-        },
+        debug: { sparse: sparse.length, dense: dense.length, scored: scored.length },
       }
     }
     return finalResults
@@ -3403,107 +1542,28 @@ export class MemoryStore {
   searchRelevantSparse(query, limit = 8) {
     const ftsQuery = buildFtsQuery(query)
     const shortTokens = getShortTokensForLike(query)
-    const includeDoneTasks = isDoneTaskQuery(query)
     if (!ftsQuery && shortTokens.length === 0) return []
     const results = []
     const runFts = Boolean(ftsQuery)
 
     if (runFts) {
       try {
-      const factHits = this.db.prepare(`
-        SELECT 'fact' AS type, f.fact_type AS subtype, CAST(f.id AS TEXT) AS ref, f.workstream AS workstream, f.text AS content,
-               bm25(facts_fts) AS score, unixepoch(f.last_seen) AS updated_at, f.id AS entity_id,
-               f.confidence AS quality_score,
-               f.retrieval_count AS retrieval_count,
-               f.source_episode_id AS source_episode_id,
-               e.source_ref AS source_ref,
-               e.ts AS source_ts,
-               e.kind AS source_kind,
-               e.backend AS source_backend
-        FROM facts_fts
-        JOIN facts f ON f.id = facts_fts.rowid
-        LEFT JOIN episodes e ON e.id = f.source_episode_id
-        WHERE facts_fts MATCH ?
-          AND f.status = 'active'
+      const classificationHits = this.db.prepare(`
+        SELECT 'classification' AS type, c.classification AS subtype, CAST(c.id AS TEXT) AS ref,
+               trim(c.classification || ' | ' || c.topic || ' | ' || c.element || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
+               bm25(classifications_fts) AS score, c.updated_at AS updated_at, c.id AS entity_id,
+               c.confidence AS quality_score, c.retrieval_count AS retrieval_count,
+               e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend
+        FROM classifications_fts
+        JOIN classifications c ON c.id = classifications_fts.rowid
+        LEFT JOIN episodes e ON e.id = c.episode_id
+        WHERE classifications_fts MATCH ?
+          AND c.status = 'active'
         ORDER BY score
         LIMIT ?
       `).all(ftsQuery, limit)
-        results.push(...factHits)
-      } catch (error) { logIgnoredError('searchRelevantSparse facts fts', error) }
-    }
-
-    if (runFts) {
-      try {
-      const taskHits = this.db.prepare(`
-        SELECT 'task' AS type, t.stage AS subtype, CAST(t.id AS TEXT) AS ref, t.workstream AS workstream,
-               trim(t.title || CASE WHEN t.details IS NOT NULL AND t.details != '' THEN ' — ' || t.details ELSE '' END) AS content,
-               bm25(tasks_fts) AS score, unixepoch(t.last_seen) AS updated_at, t.id AS entity_id,
-               t.confidence AS quality_score,
-               t.stage AS stage, t.evidence_level AS evidence_level, t.status AS status,
-               t.retrieval_count AS retrieval_count,
-               t.source_episode_id AS source_episode_id,
-               e.source_ref AS source_ref,
-               e.ts AS source_ts,
-               e.kind AS source_kind,
-               e.backend AS source_backend
-        FROM tasks_fts
-        JOIN tasks t ON t.id = tasks_fts.rowid
-        LEFT JOIN episodes e ON e.id = t.source_episode_id
-        WHERE tasks_fts MATCH ?
-          AND t.status IN (${includeDoneTasks ? "'active', 'in_progress', 'paused', 'done'" : "'active', 'in_progress', 'paused'"})
-        ORDER BY score
-        LIMIT ?
-      `).all(ftsQuery, limit)
-        results.push(...taskHits)
-      } catch (error) { logIgnoredError('searchRelevantSparse tasks fts', error) }
-    }
-
-    if (runFts) {
-      try {
-      const signalHits = this.db.prepare(`
-        SELECT 'signal' AS type, s.kind AS subtype, CAST(s.id AS TEXT) AS ref,
-               s.value AS content, bm25(signals_fts) AS score,
-               unixepoch(s.last_seen) AS updated_at, s.id AS entity_id, s.retrieval_count AS retrieval_count,
-               s.score AS quality_score,
-               s.source_episode_id AS source_episode_id,
-               e.source_ref AS source_ref,
-               e.ts AS source_ts,
-               e.kind AS source_kind,
-               e.backend AS source_backend
-        FROM signals_fts
-        JOIN signals s ON s.id = signals_fts.rowid
-        LEFT JOIN episodes e ON e.id = s.source_episode_id
-        WHERE signals_fts MATCH ?
-        ORDER BY score
-        LIMIT ?
-      `).all(ftsQuery, limit)
-        results.push(...signalHits)
-      } catch (error) { logIgnoredError('searchRelevantSparse signals fts', error) }
-    }
-
-    if (runFts) {
-      try {
-      const propositionHits = this.db.prepare(`
-        SELECT 'proposition' AS type, p.proposition_kind AS subtype, CAST(p.id AS TEXT) AS ref,
-               p.text AS content, bm25(propositions_fts) AS score,
-               unixepoch(p.last_seen) AS updated_at, p.id AS entity_id, p.retrieval_count AS retrieval_count,
-               p.confidence AS quality_score,
-               p.source_episode_id AS source_episode_id,
-               p.source_fact_id AS source_fact_id,
-               e.source_ref AS source_ref,
-               e.ts AS source_ts,
-               e.kind AS source_kind,
-               e.backend AS source_backend
-        FROM propositions_fts
-        JOIN propositions p ON p.id = propositions_fts.rowid
-        LEFT JOIN episodes e ON e.id = p.source_episode_id
-        WHERE propositions_fts MATCH ?
-          AND p.status = 'active'
-        ORDER BY score
-        LIMIT ?
-      `).all(ftsQuery, limit)
-        results.push(...propositionHits)
-      } catch (error) { logIgnoredError('searchRelevantSparse propositions fts', error) }
+        results.push(...classificationHits)
+      } catch (error) { logIgnoredError('searchRelevantSparse classifications fts', error) }
     }
 
     if (runFts) {
@@ -3540,115 +1600,53 @@ export class MemoryStore {
     // LIKE fallback for 2-char Korean tokens that trigram can't index
     if (shortTokens.length > 0 && results.length < limit) {
       const seen = new Set(results.map(r => `${r.type}:${r.entity_id}`))
-      const likeConditions = shortTokens.map(() => 'f.text LIKE ?').join(' OR ')
-      const likeParams = shortTokens.map(t => `%${t}%`)
       try {
-        const likeFacts = this.db.prepare(`
-          SELECT 'fact' AS type, f.fact_type AS subtype, CAST(f.id AS TEXT) AS ref, f.text AS content,
-                 0 AS score, unixepoch(f.last_seen) AS updated_at, f.id AS entity_id,
-                 f.confidence AS quality_score, f.retrieval_count AS retrieval_count,
-                 f.source_episode_id AS source_episode_id,
+        const likeClassifications = this.db.prepare(`
+          SELECT 'classification' AS type, c.classification AS subtype, CAST(c.id AS TEXT) AS ref,
+                 trim(c.classification || ' | ' || c.topic || ' | ' || c.element || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
+                 0 AS score, c.updated_at AS updated_at, c.id AS entity_id,
+                 c.confidence AS quality_score, c.retrieval_count AS retrieval_count,
                  e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend
-          FROM facts f
-          LEFT JOIN episodes e ON e.id = f.source_episode_id
-          WHERE f.status = 'active' AND (${likeConditions})
+          FROM classifications c
+          LEFT JOIN episodes e ON e.id = c.episode_id
+          WHERE c.status = 'active'
+            AND (${shortTokens.map(() => '(c.classification LIKE ? OR c.topic LIKE ? OR c.element LIKE ? OR c.state LIKE ?)').join(' OR ')})
           LIMIT ?
-        `).all(...likeParams, Math.min(limit, 4))
-        for (const hit of likeFacts) {
-          if (seen.has(`fact:${hit.entity_id}`)) continue
+        `).all(...shortTokens.flatMap(t => [`%${t}%`, `%${t}%`, `%${t}%`, `%${t}%`]), Math.min(limit, 4))
+        for (const hit of likeClassifications) {
+          if (seen.has(`classification:${hit.entity_id}`)) continue
           hit.score = shortTokenMatchScore(hit.content, shortTokens)
           results.push(hit)
-          seen.add(`fact:${hit.entity_id}`)
+          seen.add(`classification:${hit.entity_id}`)
         }
-      } catch (error) { logIgnoredError('searchRelevantSparse facts like', error) }
+      } catch (error) { logIgnoredError('searchRelevantSparse classifications like', error) }
       try {
-        const likeTasks = this.db.prepare(`
-          SELECT 'task' AS type, t.stage AS subtype, CAST(t.id AS TEXT) AS ref,
-                 trim(t.title || CASE WHEN t.details IS NOT NULL AND t.details != '' THEN ' — ' || t.details ELSE '' END) AS content,
-                 0 AS score, unixepoch(t.last_seen) AS updated_at, t.id AS entity_id,
-                 t.confidence AS quality_score, t.retrieval_count AS retrieval_count,
-                 t.source_episode_id AS source_episode_id,
+        const likeEpisodes = this.db.prepare(`
+          SELECT 'episode' AS type, e.role AS subtype, CAST(e.id AS TEXT) AS ref,
+                 e.content AS content, 0 AS score, e.created_at AS updated_at, e.id AS entity_id,
+                 0 AS quality_score, 0 AS retrieval_count,
                  e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend
-          FROM tasks t
-          LEFT JOIN episodes e ON e.id = t.source_episode_id
-          WHERE t.status IN (${includeDoneTasks ? "'active', 'in_progress', 'paused', 'done'" : "'active', 'in_progress', 'paused'"})
-            AND (${shortTokens.map(() => '(t.title LIKE ? OR t.details LIKE ?)').join(' OR ')})
+          FROM episodes e
+          WHERE e.kind IN (${RECALL_EPISODE_KIND_SQL})
+            AND (${shortTokens.map(() => 'e.content LIKE ?').join(' OR ')})
           LIMIT ?
-        `).all(...shortTokens.flatMap(t => [`%${t}%`, `%${t}%`]), Math.min(limit, 4))
-        for (const hit of likeTasks) {
-          if (seen.has(`task:${hit.entity_id}`)) continue
+        `).all(...shortTokens.map(t => `%${t}%`), Math.min(limit, 4))
+        for (const hit of likeEpisodes) {
+          if (seen.has(`episode:${hit.entity_id}`)) continue
           hit.score = shortTokenMatchScore(hit.content, shortTokens)
           results.push(hit)
-          seen.add(`task:${hit.entity_id}`)
+          seen.add(`episode:${hit.entity_id}`)
         }
-      } catch (error) { logIgnoredError('searchRelevantSparse tasks like', error) }
-      try {
-        const likePropositions = this.db.prepare(`
-          SELECT 'proposition' AS type, p.proposition_kind AS subtype, CAST(p.id AS TEXT) AS ref,
-                 p.text AS content, 0 AS score, unixepoch(p.last_seen) AS updated_at, p.id AS entity_id,
-                 p.confidence AS quality_score, p.retrieval_count AS retrieval_count,
-                 p.source_episode_id AS source_episode_id, p.source_fact_id AS source_fact_id,
-                 e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend
-          FROM propositions p
-          LEFT JOIN episodes e ON e.id = p.source_episode_id
-          WHERE p.status = 'active'
-            AND (${shortTokens.map(() => 'p.text LIKE ?').join(' OR ')})
-          LIMIT ?
-        `).all(...likeParams, Math.min(limit, 4))
-        for (const hit of likePropositions) {
-          if (seen.has(`proposition:${hit.entity_id}`)) continue
-          hit.score = shortTokenMatchScore(hit.content, shortTokens)
-          results.push(hit)
-          seen.add(`proposition:${hit.entity_id}`)
-        }
-      } catch (error) { logIgnoredError('searchRelevantSparse propositions like', error) }
-      try {
-        const likeSignals = this.db.prepare(`
-          SELECT 'signal' AS type, s.kind AS subtype, CAST(s.id AS TEXT) AS ref,
-                 s.value AS content, 0 AS score, unixepoch(s.last_seen) AS updated_at, s.id AS entity_id,
-                 s.retrieval_count AS retrieval_count, s.score AS quality_score,
-                 s.source_episode_id AS source_episode_id,
-                 e.source_ref AS source_ref, e.ts AS source_ts, e.kind AS source_kind, e.backend AS source_backend
-          FROM signals s
-          LEFT JOIN episodes e ON e.id = s.source_episode_id
-          WHERE (${shortTokens.map(() => '(s.kind LIKE ? OR s.value LIKE ?)').join(' OR ')})
-          LIMIT ?
-        `).all(...shortTokens.flatMap(t => [`%${t}%`, `%${t}%`]), Math.min(limit, 3))
-        for (const hit of likeSignals) {
-          if (seen.has(`signal:${hit.entity_id}`)) continue
-          hit.score = shortTokenMatchScore(`${hit.subtype ?? ''} ${hit.content}`, shortTokens)
-          results.push(hit)
-          seen.add(`signal:${hit.entity_id}`)
-        }
-      } catch (error) { logIgnoredError('searchRelevantSparse signals like', error) }
-      try {
-        const likeProfiles = this.db.prepare(`
-          SELECT 'profile' AS type, key AS subtype, key || ': ' || value AS content,
-                 0 AS score, unixepoch(last_seen) AS updated_at, 0 AS entity_id,
-                 confidence AS quality_score, retrieval_count
-          FROM profiles
-          WHERE status = 'active'
-            AND (${shortTokens.map(() => '(key LIKE ? OR value LIKE ?)').join(' OR ')})
-          LIMIT ?
-        `).all(...shortTokens.flatMap(t => [`%${t}%`, `%${t}%`]), Math.min(limit, 2))
-        for (const hit of likeProfiles) {
-          const profileKey = `profile:${hit.subtype}`
-          if (seen.has(profileKey)) continue
-          hit.score = shortTokenMatchScore(hit.content, shortTokens)
-          results.push(hit)
-          seen.add(profileKey)
-        }
-      } catch (error) { logIgnoredError('searchRelevantSparse profiles like', error) }
+      } catch (error) { logIgnoredError('searchRelevantSparse episodes like', error) }
     }
 
     return results
   }
 
-  async searchRelevantDense(query, limit = 8, queryVector = null, focusVector = null, options = {}) {
+  async searchRelevantDense(query, limit = 8, queryVector = null, focusVector = null, _options = {}) {
     const clean = cleanMemoryText(query)
     if (!clean) return []
     const vector = queryVector ?? await embedText(clean)
-    const includeDoneTasks = Boolean(options.includeDoneTasks)
     if (!Array.isArray(vector) || vector.length === 0) return []
     const model = getEmbeddingModelId()
     const expectedDims = getEmbeddingDims()
@@ -3685,7 +1683,8 @@ export class MemoryStore {
         const results = []
         for (const knn of knnRows) {
           const { entityType, entityId } = this._vecRowToEntity(knn.rowid)
-          const meta = this._getEntityMeta(entityType, entityId, model, { includeDoneTasks })
+          if (entityType !== 'classification' && entityType !== 'episode') continue
+          const meta = this._getEntityMeta(entityType, entityId, model, {})
           if (!meta) continue
           const similarity = 1 - knn.distance  // L2 distance → approximate similarity
           const focusSimilarity = Array.isArray(focusVector) ? (() => {
@@ -3709,13 +1708,8 @@ export class MemoryStore {
 
     // Fallback: JS cosine scan
     const rows = [
-      ...this.listDenseFactRowsStmt.all(model),
-      ...(includeDoneTasks ? this.listDenseTaskRowsWithDoneStmt.all(model) : this.listDenseTaskRowsStmt.all(model)),
-      ...this.listDenseSignalRowsStmt.all(model),
-      ...this.listDensePropositionRowsStmt.all(model),
+      ...this.listDenseClassificationRowsStmt.all(model),
       ...this.listDenseEpisodeRowsStmt.all(model),
-      ...this.listDenseEntityRowsStmt.all(model),
-      ...this.listDenseRelationRowsStmt.all(model),
     ]
 
     return rows
@@ -3742,65 +1736,21 @@ export class MemoryStore {
       .slice(0, limit)
   }
 
-  _getEntityMeta(entityType, entityId, model, options = {}) {
+  _getEntityMeta(entityType, entityId, model, _options = {}) {
     try {
-      const includeDoneTasks = Boolean(options.includeDoneTasks)
-      if (entityType === 'fact') {
+      if (entityType === 'classification') {
         return this.db.prepare(`
-          SELECT 'fact' AS type, f.fact_type AS subtype, f.id AS entity_id, f.text AS content,
-                 unixepoch(f.last_seen) AS updated_at, f.retrieval_count AS retrieval_count,
-                 f.source_episode_id AS source_episode_id,
+          SELECT 'classification' AS type, c.classification AS subtype, c.id AS entity_id,
+                 trim(c.classification || ' | ' || c.topic || ' | ' || c.element || CASE WHEN c.state IS NOT NULL AND c.state != '' THEN ' | ' || c.state ELSE '' END) AS content,
+                 c.updated_at AS updated_at, c.retrieval_count AS retrieval_count,
+                 c.confidence AS quality_score,
                  e.source_ref AS source_ref, e.ts AS source_ts,
                  e.kind AS source_kind, e.backend AS source_backend,
                  mv.vector_json
-          FROM facts f
-          JOIN memory_vectors mv ON mv.entity_type = 'fact' AND mv.entity_id = f.id AND mv.model = ?
-          LEFT JOIN episodes e ON e.id = f.source_episode_id
-          WHERE f.id = ? AND f.status = 'active'
-        `).get(model, entityId)
-      }
-      if (entityType === 'task') {
-        return this.db.prepare(`
-          SELECT 'task' AS type, t.stage AS subtype, t.id AS entity_id,
-                 trim(t.title || CASE WHEN t.details != '' THEN ' — ' || t.details ELSE '' END) AS content,
-                 unixepoch(t.last_seen) AS updated_at, t.retrieval_count AS retrieval_count,
-                 t.source_episode_id AS source_episode_id,
-                 e.source_ref AS source_ref, e.ts AS source_ts,
-                 e.kind AS source_kind, e.backend AS source_backend,
-                 mv.vector_json
-          FROM tasks t
-          JOIN memory_vectors mv ON mv.entity_type = 'task' AND mv.entity_id = t.id AND mv.model = ?
-          LEFT JOIN episodes e ON e.id = t.source_episode_id
-          WHERE t.id = ? AND t.status IN (${includeDoneTasks ? "'active', 'in_progress', 'paused', 'done'" : "'active', 'in_progress', 'paused'"})
-        `).get(model, entityId)
-      }
-      if (entityType === 'signal') {
-        return this.db.prepare(`
-          SELECT 'signal' AS type, s.kind AS subtype, s.id AS entity_id, s.value AS content,
-                 unixepoch(s.last_seen) AS updated_at, s.retrieval_count AS retrieval_count,
-                 s.source_episode_id AS source_episode_id,
-                 e.source_ref AS source_ref, e.ts AS source_ts,
-                 e.kind AS source_kind, e.backend AS source_backend,
-                 mv.vector_json
-          FROM signals s
-          JOIN memory_vectors mv ON mv.entity_type = 'signal' AND mv.entity_id = s.id AND mv.model = ?
-          LEFT JOIN episodes e ON e.id = s.source_episode_id
-          WHERE s.id = ?
-        `).get(model, entityId)
-      }
-      if (entityType === 'proposition') {
-        return this.db.prepare(`
-          SELECT 'proposition' AS type, p.proposition_kind AS subtype, p.id AS entity_id, p.text AS content,
-                 unixepoch(p.last_seen) AS updated_at, p.retrieval_count AS retrieval_count,
-                 p.source_fact_id AS source_fact_id,
-                 p.source_episode_id AS source_episode_id,
-                 e.source_ref AS source_ref, e.ts AS source_ts,
-                 e.kind AS source_kind, e.backend AS source_backend,
-                 mv.vector_json
-          FROM propositions p
-          JOIN memory_vectors mv ON mv.entity_type = 'proposition' AND mv.entity_id = p.id AND mv.model = ?
-          LEFT JOIN episodes e ON e.id = p.source_episode_id
-          WHERE p.id = ? AND p.status = 'active'
+          FROM classifications c
+          JOIN memory_vectors mv ON mv.entity_type = 'classification' AND mv.entity_id = c.id AND mv.model = ?
+          LEFT JOIN episodes e ON e.id = c.episode_id
+          WHERE c.id = ? AND c.status = 'active'
         `).get(model, entityId)
       }
       if (entityType === 'episode') {
@@ -3815,37 +1765,11 @@ export class MemoryStore {
             AND e.kind IN (${RECALL_EPISODE_KIND_SQL})
         `).get(model, entityId)
       }
-      if (entityType === 'entity') {
-        return this.db.prepare(`
-          SELECT 'entity' AS type, en.entity_type AS subtype, en.id AS entity_id,
-                 trim(en.name || CASE WHEN en.description IS NOT NULL AND en.description != '' THEN ' — ' || en.description ELSE '' END) AS content,
-                 unixepoch(en.last_seen) AS updated_at, 0 AS retrieval_count,
-                 NULL AS source_kind, NULL AS source_backend,
-                 mv.vector_json
-          FROM entities en
-          JOIN memory_vectors mv ON mv.entity_type = 'entity' AND mv.entity_id = en.id AND mv.model = ?
-          WHERE en.id = ?
-        `).get(model, entityId)
-      }
-      if (entityType === 'relation') {
-        return this.db.prepare(`
-          SELECT 'relation' AS type, r.relation_type AS subtype, r.id AS entity_id,
-                 trim(se.name || ' -> ' || te.name || CASE WHEN r.description IS NOT NULL AND r.description != '' THEN ' — ' || r.description ELSE '' END) AS content,
-                 unixepoch(r.last_seen) AS updated_at, 0 AS retrieval_count,
-                 NULL AS source_kind, NULL AS source_backend,
-                 mv.vector_json
-          FROM relations r
-          JOIN entities se ON se.id = r.source_entity_id
-          JOIN entities te ON te.id = r.target_entity_id
-          JOIN memory_vectors mv ON mv.entity_type = 'relation' AND mv.entity_id = r.id AND mv.model = ?
-          WHERE r.id = ? AND r.status = 'active'
-        `).get(model, entityId)
-      }
     } catch {}
     return null
   }
 
-  combineRetrievalResults(query, sparseResults, denseResults, limit = 8, intent = null, queryEntities = [], options = {}) {
+  combineRetrievalResults(query, sparseResults, denseResults, limit = 8, intent = null, _queryEntities = [], options = {}) {
     const now = Date.now()
     const merged = new Map()
     const queryTokens = new Set(tokenizeMemoryText(query))
@@ -3943,19 +1867,15 @@ export class MemoryStore {
     const ranked = collapseClaimSurfaceDuplicates(scored, 'weighted_score')
       .sort((a, b) => Number(a.weighted_score) - Number(b.weighted_score))
 
-    const hasCoreResult = ranked.some(item => item.type === 'fact' || item.type === 'task')
+    const hasCoreResult = ranked.some(item => item.type === 'classification')
     const conciseQuery = queryTokenCount <= 4
-    const hasTaskCandidate = ranked.some(item => item.type === 'task')
+    const hasTaskCandidate = false
     const typeCaps = getIntentTypeCaps(effectiveIntent, { hasTaskCandidate, hasCoreResult, conciseQuery })
     const typeCounts = new Map()
     const selected = []
-    // Ensure core types (fact/task/proposition) are represented in rerank pool
     const sliceSize = Math.max(limit * 4, 20)
     const sliced = ranked.slice(0, sliceSize)
-    const slicedIds = new Set(sliced.map(item => `${item.type}:${item.entity_id ?? item.ref}`))
-    const coreTypes = new Set(['fact', 'task', 'proposition'])
-    const missingCore = ranked.filter(item => coreTypes.has(item.type) && !slicedIds.has(`${item.type}:${item.entity_id ?? item.ref}`)).slice(0, limit)
-    const rerankInput = [...sliced, ...missingCore]
+    const rerankInput = [...sliced]
     const rerankPool = collapseClaimSurfaceDuplicates(rerankInput, 'rerank_score')
       .map(item => ({
         ...item,
@@ -3990,179 +1910,16 @@ export class MemoryStore {
     const now = localNow()
     const seen = new Set()
     for (const item of results) {
-      const profileKey = String(item?.subtype ?? '').trim()
       const entityId = Number(item?.entity_id ?? item?.id)
-      const dedupeKey =
-        item?.type === 'profile'
-          ? `profile:${profileKey}`
-          : `${String(item?.type ?? '')}:${entityId}`
+      const dedupeKey = `${String(item?.type ?? '')}:${entityId}`
       if (seen.has(dedupeKey)) continue
       seen.add(dedupeKey)
-      if (item.type === 'profile' && profileKey) {
-        this.bumpProfileRetrievalStmt.run(now, profileKey)
+      if (item.type === 'classification') {
+        this.bumpClassificationRetrievalStmt.run(now, entityId)
       } else if (!Number.isFinite(entityId) || entityId <= 0) {
         continue
-      } else if (item.type === 'fact') {
-        this.bumpFactRetrievalStmt.run(now, entityId)
-      } else if (item.type === 'task') {
-        this.bumpTaskRetrievalStmt.run(now, entityId)
-      } else if (item.type === 'signal') {
-        this.bumpSignalRetrievalStmt.run(now, entityId)
-      } else if (item.type === 'proposition') {
-        this.bumpPropositionRetrievalStmt.run(now, entityId)
       }
     }
-  }
-
-  async getCoreMemoryItems(query = '', intent = null, queryVector = null) {
-    const queryTokens = new Set(tokenizeMemoryText(query))
-    const primaryIntent = intent?.primary ?? 'decision'
-    const vector = query ? (queryVector ?? await embedText(query)) : null
-    // Profile hints removed — profiles are injected once at session start via context.md
-
-    const coreFacts = this.db.prepare(`
-      SELECT id, 'fact' AS type, fact_type AS subtype, text AS content, confidence, last_seen
-      FROM facts
-      WHERE status = 'active'
-        AND fact_type IN ('preference', 'constraint')
-      ORDER BY confidence DESC, retrieval_count DESC, mention_count DESC, last_seen DESC
-      LIMIT 10
-    `).all()
-
-    const coreSignals = this.db.prepare(`
-      SELECT id, 'signal' AS type, kind AS subtype, value AS content, score AS confidence, last_seen
-      FROM signals
-      WHERE kind IN ('language', 'tone')
-      ORDER BY score DESC, retrieval_count DESC, last_seen DESC
-      LIMIT 6
-    `).all()
-      .map(item => ({
-        ...item,
-        effectiveScore: decaySignalScore(item.confidence, item.last_seen, item.subtype),
-      }))
-      .filter(item => item.effectiveScore >= 0.45)
-
-    const dedupe = new Set()
-    const items = []
-    const scopedCoreFacts =
-      isProfileIntent(primaryIntent)
-        ? coreFacts.filter(item => isProfileRelatedText(item.content))
-        : coreFacts
-    const combined = [...scopedCoreFacts, ...coreSignals]
-    const semanticScores = vector
-      ? await Promise.all(combined.map(async item => {
-          const entityType = item.type === 'fact' ? 'fact' : 'signal'
-          const itemVector = await this.getStoredVector(entityType, item.id, `${item.subtype} ${item.content}`)
-          return cosineSimilarity(vector, itemVector)
-        }))
-      : combined.map(() => 0)
-
-    for (let i = 0; i < combined.length; i += 1) {
-      const item = combined[i]
-      const key = `${item.type}:${item.subtype}:${item.content}`
-      if (dedupe.has(key)) continue
-      dedupe.add(key)
-      const contentTokens = tokenizeMemoryText(`${item.subtype} ${item.content}`)
-      const overlapCount = contentTokens.reduce((count, token) => count + (queryTokens.has(token) ? 1 : 0), 0)
-      const typeBoost =
-        item.type === 'signal'
-          ? (item.subtype === 'language' || item.subtype === 'tone' ? 2 : 1)
-          : item.subtype === 'preference'
-            ? 2
-            : 1
-      const intentBoost =
-        isProfileIntent(primaryIntent)
-          ? typeBoost
-          : primaryIntent === 'task'
-            ? (item.subtype === 'constraint' ? 1 : 0)
-            : isPolicyIntent(primaryIntent)
-              ? (item.subtype === 'constraint' ? 2 : item.subtype === 'preference' ? 1 : 0)
-            : 0
-      const semanticBoost = vector ? semanticScores[i] * 3 : 0
-      items.push({
-        ...item,
-        overlapCount,
-        rankScore: overlapCount * 3 + intentBoost + semanticBoost + Number(item.confidence ?? item.effectiveScore ?? 0.5),
-      })
-    }
-    const limit =
-      isProfileIntent(primaryIntent) ? 4 :
-      isPolicyIntent(primaryIntent) ? 3 :
-      primaryIntent === 'decision' ? 3 :
-      primaryIntent === 'task' ? 1 :
-      primaryIntent === 'history' ? 1 :
-      2
-    return items
-      .filter(item => {
-        // profile intent: only profile-shaped facts/signals
-        if (isProfileIntent(primaryIntent)) return item.type === 'signal' || isProfileRelatedText(item.content)
-        // others: require keyword overlap or semantic relevance
-        return Number(item.overlapCount) > 0 || Number(item.rankScore) > 4.5
-      })
-      .sort((a, b) => Number(b.rankScore) - Number(a.rankScore))
-      .slice(0, limit)
-  }
-
-  async getPriorityTasks(query = '', options = {}) {
-    const queryVector = query ? await embedText(query) : []
-    const focusVector = options.focusVector ?? await this.buildRecentFocusVector({
-      channelId: options.channelId,
-      userId: options.userId,
-    })
-    const workstreamHint = normalizeWorkstream(options.workstreamHint)
-    const hintTokens = tokenizedWorkstream(workstreamHint)
-    const includeDone = Boolean(options.includeDone) || isDoneTaskQuery(query)
-
-    const rows = this.db.prepare(`
-      SELECT id, title, details, workstream, status, priority, confidence, last_seen, retrieval_count, stage, evidence_level
-      FROM tasks
-      WHERE status IN (${includeDone ? "'active', 'in_progress', 'paused', 'done'" : "'active', 'in_progress', 'paused'"})
-      ORDER BY CASE priority WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, retrieval_count DESC, last_seen DESC
-      LIMIT 12
-    `).all()
-
-    const scored = await Promise.all(rows.map(async row => {
-      const content = cleanMemoryText(`${row.title} ${row.details ?? ''}`)
-      const taskVector = await this.getStoredVector('task', row.id, content)
-      const querySimilarity =
-        Array.isArray(queryVector) && queryVector.length === taskVector.length
-          ? cosineSimilarity(queryVector, taskVector)
-          : 0
-      const focusSimilarity =
-        Array.isArray(focusVector) && focusVector.length === taskVector.length
-          ? cosineSimilarity(focusVector, taskVector)
-          : 0
-      const priorityBoost =
-        row.priority === 'high' ? 0.35 :
-        row.priority === 'normal' ? 0.18 :
-        0
-      const statusBoost =
-        includeDone && row.status === 'done' ? 1.6 :
-        includeDone && (row.status === 'active' || row.status === 'in_progress') ? -0.45 :
-        row.status === 'active' || row.status === 'in_progress' ? 0.08 :
-        0
-      const stageBoost =
-        row.stage === 'implementing' ? 0.42 :
-        row.stage === 'wired' ? 0.34 :
-        row.stage === 'verified' ? 0.24 :
-        row.stage === 'investigating' ? 0.12 :
-        row.stage === 'planned' ? -0.08 :
-        row.stage === 'done' ? (includeDone ? 0.20 : -0.08) :
-        0
-      const workstreamMatch =
-        hintTokens.length > 0
-          ? tokenizedWorkstream(row.workstream).filter(token => hintTokens.includes(token)).length
-          : 0
-      const recencyBoost = Math.min(0.18, Number(row.retrieval_count ?? 0) * 0.01)
-      return {
-        ...row,
-        priority_score: querySimilarity * 4 + focusSimilarity * 3 + priorityBoost + statusBoost + stageBoost + workstreamMatch * 1.2 + recencyBoost + Number(row.confidence ?? 0.5),
-      }
-    }))
-
-    return scored
-      .sort((a, b) => Number(b.priority_score) - Number(a.priority_score))
-      .slice(0, Math.max(1, Number(options.limit ?? 3)))
   }
 
   async buildInboundMemoryContext(query, options = {}) {

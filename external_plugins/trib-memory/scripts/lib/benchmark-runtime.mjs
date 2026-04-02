@@ -103,13 +103,12 @@ export function prepareWritableDataDir(sourceDir, options = {}) {
 export function configureBenchmarkEmbedding(allowMlService = false) {
   const mainConfig = readMainConfig()
   const embeddingConfig = mainConfig?.embedding
-  process.env.TRIB_MEMORY_FORCE_LOCAL_EMBEDDING = allowMlService ? '0' : '1'
-  if (embeddingConfig?.provider || embeddingConfig?.ollamaModel) {
-    configureEmbedding({
-      provider: embeddingConfig.provider,
-      ollamaModel: embeddingConfig.ollamaModel,
-    })
-  }
+  process.env.TRIB_MEMORY_FORCE_LOCAL_EMBEDDING = '0'
+  process.env.TRIB_MEMORY_ENABLE_ML_SERVICE = allowMlService ? '1' : '0'
+  configureEmbedding({
+    provider: embeddingConfig?.provider ?? 'ollama',
+    ollamaModel: embeddingConfig?.ollamaModel ?? 'bge-m3',
+  })
 }
 
 export async function prepareBenchmarkStore(store, reason = 'benchmark_prepare_dense') {

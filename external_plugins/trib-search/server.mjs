@@ -49,8 +49,10 @@ import {
 } from './lib/ai-providers.mjs'
 import { crawlSite, getScrapeCapabilities, mapSite, scrapeUrls } from './lib/web-tools.mjs'
 import { formatResponse } from './lib/formatter.mjs'
+import { startAiCliWorker, stopAiCliWorker } from './lib/ai-cli-worker-host.mjs'
 
 ensureDataDir()
+startAiCliWorker({ cwd: process.cwd() })
 
 const searchArgsSchema = z.object({
   keywords: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
@@ -1023,3 +1025,11 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
 const transport = new StdioServerTransport()
 await writeStartupSnapshot()
 await server.connect(transport)
+
+async function shutdown() {
+  await stopAiCliWorker().catch(() => {})
+  process.exit(0)
+}
+
+process.on('SIGTERM', () => { void shutdown() })
+process.on('SIGINT', () => { void shutdown() })

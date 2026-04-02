@@ -27,6 +27,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import { getMemoryStore } from '../lib/memory.mjs'
 import { configureEmbedding } from '../lib/embedding-provider.mjs'
+import { startLlmWorker, stopLlmWorker } from '../lib/llm-worker-host.mjs'
 import {
   sleepCycle,
   memoryFlush,
@@ -41,6 +42,7 @@ import {
 import { localNow, localDateStr } from '../lib/memory-text-utils.mjs'
 import {
   readMemoryOpsPolicy,
+  readMemoryFeatureFlags,
   buildStartupBackfillOptions,
   resolveStartupEmbeddingOptions,
   shouldRunCycleCatchUp,
@@ -70,28 +72,11 @@ const PORT_FILE = path.join(os.tmpdir(), 'trib-memory', 'memory-port')
 const BASE_PORT = 3350
 const MAX_PORT = 3357
 
-// ── Temporal parser (optional Python dateparser) ─────────────────────
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const venvPythonUnix = path.join(__dirname, '.venv', 'bin', 'python3')
-const venvPythonWin = path.join(__dirname, '.venv', 'Scripts', 'python.exe')
-const mlPython = fs.existsSync(venvPythonUnix) ? venvPythonUnix : fs.existsSync(venvPythonWin) ? venvPythonWin : null
-let temporalProcess = null
-if (mlPython) {
-  try {
-    temporalProcess = spawn(mlPython, [path.join(__dirname, 'ml-service.py')], { stdio: 'ignore' })
-    temporalProcess.on('exit', (code) => process.stderr.write(`[temporal] exited code=${code}\n`))
-    process.stderr.write(`[temporal] spawned with ${mlPython}\n`)
-  } catch (e) {
-    process.stderr.write(`[temporal] spawn failed: ${e.message}\n`)
-  }
-} else {
-  process.stderr.write(`[temporal] python venv not found, temporal parsing disabled\n`)
-}
-
 // ── Store initialization ─────────────────────────────────────────────
 
 const mainConfig = readMainConfig()
 const opsPolicy = readMemoryOpsPolicy(mainConfig)
+const featureFlags = readMemoryFeatureFlags(mainConfig)
 const embeddingConfig = mainConfig?.embedding
 if (embeddingConfig?.provider || embeddingConfig?.ollamaModel) {
   configureEmbedding({
@@ -102,6 +87,35 @@ if (embeddingConfig?.provider || embeddingConfig?.ollamaModel) {
 
 const store = getMemoryStore(DATA_DIR)
 store.syncHistoryFromFiles()
+startLlmWorker({
+  cwd: process.cwd(),
+  env: {
+    CLAUDE_PLUGIN_ROOT: process.env.CLAUDE_PLUGIN_ROOT || '',
+    CLAUDE_PLUGIN_DATA: DATA_DIR,
+  },
+})
+
+// ── Temporal parser (optional Python dateparser) ─────────────────────
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const venvPythonUnix = path.join(__dirname, '.venv', 'bin', 'python3')
+const venvPythonWin = path.join(__dirname, '.venv', 'Scripts', 'python.exe')
+const mlPython = fs.existsSync(venvPythonUnix) ? venvPythonUnix : fs.existsSync(venvPythonWin) ? venvPythonWin : null
+let temporalProcess = null
+if (featureFlags.temporalParser) {
+  if (mlPython) {
+    try {
+      temporalProcess = spawn(mlPython, [path.join(__dirname, 'ml-service.py')], { stdio: 'ignore' })
+      temporalProcess.on('exit', (code) => process.stderr.write(`[temporal] exited code=${code}\n`))
+      process.stderr.write(`[temporal] spawned with ${mlPython}\n`)
+    } catch (e) {
+      process.stderr.write(`[temporal] spawn failed: ${e.message}\n`)
+    }
+  } else {
+    process.stderr.write(`[temporal] python venv not found, temporal parsing disabled\n`)
+  }
+} else {
+  process.stderr.write('[temporal] disabled by config (memory.runtime.features.temporalParser=false)\n')
+}
 
 // WORKSPACE_PATH for cycle functions that call backfillProject(ws).
 // If the ws path doesn't resolve to a valid project dir, backfillProject
@@ -360,6 +374,20 @@ function formatDirectRows(rows) {
   }).join('\n')
 }
 
+function formatClassificationRows(rows) {
+  if (rows.length === 0) return '(no matching classifications found)'
+  return rows.map(row => {
+    const ts = String(row.ts ?? row.updated_at ?? '').trim()
+    const fields = [
+      `분류=${row.classification}`,
+      `주제=${row.topic}`,
+      `요소=${row.element}`,
+      row.state ? `상태=${row.state}` : null,
+    ].filter(Boolean).join(' | ')
+    return `[${ts}] ${fields}`
+  }).join('\n')
+}
+
 // ── Recall handler (all modes) ───────────────────────────────────────
 
 async function handleRecall(args) {
@@ -401,95 +429,20 @@ async function handleRecall(args) {
     if (inferredIntent.primary === 'event' || (trStart && trEnd && inferredIntent.primary === 'history')) {
       effectiveMode = 'episodes'
       effectiveType = 'episodes'
-    } else if (inferredIntent.primary === 'task') {
-      effectiveMode = 'tasks'
-      effectiveType = 'tasks'
-    } else if (inferredIntent.primary === 'profile') {
-      effectiveMode = 'profile'
-      effectiveType = 'profiles'
-    } else if (inferredIntent.primary === 'policy' || inferredIntent.primary === 'security') {
-      effectiveMode = 'policy'
-      effectiveType = 'facts'
+    } else {
+      effectiveMode = 'search'
+      effectiveType = 'classifications'
     }
   }
 
-  const loadProfileRows = async () => {
-    return filterRowsByMetadata(store.getProfileRecallRows(query, limit))
-  }
-
-  const loadPolicyRows = async () => {
-    const hybrid = await store.searchRelevantHybrid(query || '', limit, {
-      intent: { primary: 'policy', scores: {} },
-      filters: metadataFilters,
-      temporal: temporalOverride,
-      recordRetrieval: false,
+  const loadClassificationRows = async () => {
+    const rows = store.getClassificationRows(limit)
+    if (!query) return rows
+    const lowered = query.toLowerCase()
+    return rows.filter(row => {
+      const text = `${row.classification} ${row.topic} ${row.element} ${row.state ?? ''}`.toLowerCase()
+      return text.includes(lowered)
     })
-    const rows = Array.isArray(hybrid) ? hybrid : (hybrid?.results ?? [])
-    return filterRowsByMetadata(rows)
-  }
-
-  const loadEntityRows = async () => {
-    return filterRowsByMetadata(store.getEntityRecallRows(query, limit))
-  }
-
-  const loadRelationRows = async () => {
-    return filterRowsByMetadata(store.getRelationRecallRows(query, limit))
-  }
-
-  const loadDirectTypeRows = async (kind) => {
-    if (kind === 'profiles') return await loadProfileRows()
-    if (kind === 'entities') return await loadEntityRows()
-    if (kind === 'relations') return await loadRelationRows()
-    if (kind === 'facts') return await loadPolicyRows()
-    return []
-  }
-
-  // ── mode: verify ──
-  if (effectiveMode === 'verify') {
-    if (!query) return { text: '(query required for verify mode)', isError: true }
-    const { embedText } = await import('../lib/embedding-provider.mjs')
-    const vector = await embedText(query)
-    const verifyLimit = Math.min(limit, 3)
-    const matches = await store.verifyMemoryClaim(query, {
-      limit: verifyLimit,
-      queryVector: vector,
-      ftsQuery,
-    })
-    const best = matches[0]
-    if (!best || !best.accepted) {
-      return {
-        text: JSON.stringify({
-          matched: false,
-          fact: null,
-          query,
-          best_candidate: best ? {
-            fact: best.text ?? best.content ?? '',
-            confidence: Number(best.confidence ?? best.similarity ?? 0).toFixed(2),
-            lexical_overlap: Number(best.lexical_overlap ?? 0).toFixed(2),
-            verify_score: Number(best.verify_score ?? 0).toFixed(2),
-          } : null,
-        }),
-      }
-    }
-    return {
-      text: JSON.stringify({
-        matched: true,
-        fact: best.text ?? best.content ?? '',
-        mention_count: best.mention_count ?? 0,
-        last_seen: best.last_seen ?? null,
-        confidence: Number(best.confidence ?? best.similarity ?? 0).toFixed(2),
-        lexical_overlap: Number(best.lexical_overlap ?? 0).toFixed(2),
-        verify_score: Number(best.verify_score ?? 0).toFixed(2),
-        status: best.status ?? 'active',
-        all_matches: matches.map(m => ({
-          fact: m.text ?? m.content ?? '',
-          mention_count: m.mention_count ?? 0,
-          confidence: Number(m.confidence ?? m.similarity ?? 0).toFixed(2),
-          lexical_overlap: Number(m.lexical_overlap ?? 0).toFixed(2),
-          verify_score: Number(m.verify_score ?? 0).toFixed(2),
-        })),
-      }),
-    }
   }
 
   // ── mode: episodes ──
@@ -579,49 +532,15 @@ async function handleRecall(args) {
     return { text: output }
   }
 
-  // ── mode: bulk ──
-  if (effectiveMode === 'bulk') {
-    const hints = args.hints
-    if (!Array.isArray(hints) || hints.length === 0) {
-      return { text: '(hints array required for bulk mode)', isError: true }
-    }
-    const { embedText: embedFn } = await import('../lib/embedding-provider.mjs')
-    const summary = await store.bulkVerifyHints(hints, { embedFn })
-    return { text: JSON.stringify(summary, null, useCompact ? 0 : 2) }
-  }
-
-  // ── mode: tasks ──
-  if (effectiveMode === 'tasks') {
-    const tasks = await filterRowsByMetadata(await store.getPriorityTasks(query, { limit }))
-    store.recordRetrieval(tasks)
-    const rows = tasks.map(task => ({
-      type: 'task',
-      subtype: task.stage,
-      status: task.status,
-      content: `${task.title}${task.details ? ` \u2014 ${task.details}` : ''}`,
-      confidence: task.confidence,
-      last_seen: task.last_seen,
-    }))
-    return { text: formatDirectRows(rows) }
-  }
-
-  // ── mode: policy ──
-  if (effectiveMode === 'policy') {
-    const rows = await loadPolicyRows()
-    store.recordRetrieval(rows)
-    return { text: formatDirectRows(rows) }
-  }
-
-  // ── mode: profile ──
-  if (effectiveMode === 'profile') {
-    const rows = await loadProfileRows()
-    store.recordRetrieval(rows)
-    return { text: formatDirectRows(rows) }
-  }
-
   // ── mode: search (default) ──
   // Special query shortcuts
-  if (['all', 'facts', 'episodes', 'profiles', 'tasks', 'signals', 'entities', 'relations'].includes(queryLower)) {
+  if (['all', 'episodes', 'classifications'].includes(queryLower)) {
+    if (queryLower === 'classifications') {
+      const rows = await loadClassificationRows()
+      if (rows.length === 0) return { text: '(no classifications found)' }
+      store.recordRetrieval(rows.map(row => ({ type: 'classification', entity_id: row.id })))
+      return { text: formatClassificationRows(rows) }
+    }
     const rows = await filterRowsByMetadata(
       store.getRecallShortcutRows(queryLower, limit, { startDate: trStart, endDate: trEnd }),
     )
@@ -653,10 +572,10 @@ async function handleRecall(args) {
 
   if (!query) return { text: '(query required for search mode)', isError: true }
 
-  if (['profiles', 'entities', 'relations'].includes(effectiveType)) {
-    const directRows = await loadDirectTypeRows(effectiveType)
-    store.recordRetrieval(directRows)
-    return { text: formatDirectRows(directRows) }
+  if (effectiveType === 'classifications') {
+    const rows = await loadClassificationRows()
+    store.recordRetrieval(rows.map(row => ({ type: 'classification', entity_id: row.id })))
+    return { text: formatClassificationRows(rows) }
   }
 
   const hybrid = await store.searchRelevantHybrid(query, limit * 2, {
@@ -671,7 +590,7 @@ async function handleRecall(args) {
 
   if (!results || results.length === 0) return { text: '(no matching memories found)' }
 
-  const typeMap = { fact: 'facts', task: 'tasks', signal: 'signals', episode: 'episodes' }
+  const typeMap = { classification: 'classifications', episode: 'episodes' }
   const filtered = results
     .filter(r => effectiveType === 'all' || typeMap[r.type] === effectiveType || r.type === effectiveType)
     .slice(0, limit)
@@ -729,12 +648,16 @@ async function handleRecall(args) {
   const formatted = filtered.map(r => {
     const ts = r.updated_at ?? r.source_ts
     const date = ts ? new Date(typeof ts === 'number' && ts < 1e12 ? ts * 1000 : ts).toLocaleString() : 'unknown'
+    const isClassification = r.type === 'classification'
     const meta = [
       r.type,
       r.subtype ? `subtype:${String(r.subtype)}` : null,
       r.retrieval_count ? `retrieved:${r.retrieval_count}` : null,
     ].filter(Boolean).join(', ')
-    let line = `[${date}] ${r.content || r.text || ''} (${meta})`
+    const content = isClassification
+      ? String(r.content || r.text || '')
+      : String(r.content || r.text || '')
+    let line = `[${date}] ${content} (${meta})`
     if (includeSource) {
       const sourceParts = buildSourceParts(r)
       if (sourceParts.length > 0) line += `\n  \u2514 source: ${sourceParts.join(' | ')}`
@@ -780,7 +703,8 @@ async function handleCycle(args) {
     return { text: 'Memory prune completed.' }
   }
   if (action === 'cycle1') {
-    const c1result = await runCycle1(ws, config)
+    const force = Boolean(args.force)
+    const c1result = await runCycle1(ws, config, { force })
     return { text: `Cycle1 completed: ${JSON.stringify(c1result)}` }
   }
   return { text: `unknown memory action: ${action}`, isError: true }
@@ -792,14 +716,14 @@ async function handleCycle(args) {
 
 const MEMORY_INSTRUCTIONS = [
   '## Memory Tool Policy',
-  'If the answer depends on past facts, events, rules, profile, or ongoing work and you are not already certain, call recall_memory before replying. Do not guess from memory-context alone.',
-  'Recall routing: events/date/timeline -> episodes; rules/constraints -> verify or policy; current work -> tasks; language/tone/address -> profile; broad recall -> search.',
+  'If the answer depends on past conversations, dates, categories, topics, elements, or ongoing context and you are not already certain, call recall_memory before replying. Do not guess from memory-context alone.',
+  'Recall routing: events/date/timeline -> episodes; broad memory/category/topic lookup -> search; current long-term memory snapshot -> classifications.',
   'When the user is asking you to remember or verify, always prefer the recall_memory MCP tool over unaided answering.',
   'Pass explicit parameters: mode for strategy; query for the target fact/event/rule unless you are browsing episodes by date only; timerange for time-bounded recall; type only with search; hints only with bulk; source/context only with episodes when trace or surrounding turns are needed.',
-  'Search best practice: date-only lookup -> episodes + timerange; event/topic lookup -> episodes + query (+ timerange if known); rule lookup -> verify or policy; current work -> tasks; language/tone/address -> profile.',
-  'Memory hints are injected automatically each turn via hooks. Use recall_memory to supplement hints — verify facts, get detailed episodes, check event history, or retrieve additional context when hints are insufficient.',
+  'Search best practice: date-only lookup -> episodes + timerange; event/topic lookup -> episodes + query (+ timerange if known); broad memory lookup -> search; long-term memory snapshot -> classifications.',
+  'Memory hints are injected automatically each turn via hooks. Use recall_memory to supplement hints — get detailed episodes, check event history, or retrieve additional classification context when hints are insufficient.',
   'When recalled memory conflicts with the current code, config, or observable state, trust the current state. Memory is a reference, not the source of truth.',
-  'When this memory system is active, do not write work state, task progress, or session context to auto-memory files (MEMORY.md). The memory cycle extracts and stores this automatically. Only write stable rules and user preferences to auto-memory when the user explicitly asks to remember.',
+  'When this memory system is active, do not write work state or session context to auto-memory files (MEMORY.md). The memory cycle derives long-term context from episodes automatically.',
 ].join('\n')
 
 const mcp = new Server(
@@ -827,20 +751,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'recall_memory',
       annotations: { title: 'Memory Recall' },
-      description: 'Search memory DB for relevant facts, tasks, signals, profiles, entities, relations, and episodes. Use silently.\n\nParameters:\n- mode: search | verify | episodes | bulk | tasks | policy | profile\n- query: target fact/event/rule/profile/work description; optional for episodes when timerange-only browsing is intended\n- timerange: optional date filter for all modes, formats: "today", "this-week", "3d", "1w", "2026-03", "2026-03-28", "2026-03-25~2026-03-28"\n- type: optional search-only filter\n- hints: bulk-only\n- source/context: episodes-only when trace or nearby turns are needed\n\nSearch guide:\n- date-only recall -> episodes + timerange\n- event/topic recall -> episodes + query (+ timerange if known)\n- rule/restriction recall -> verify or policy\n- current work recall -> tasks\n- language/tone/address recall -> profile\n\nCanonical calls:\n- recall_memory(mode="episodes", timerange="2026-03-28")\n- recall_memory(mode="episodes", query="event", timerange="2026-03-28", context=2, source=true)\n- recall_memory(mode="policy", query="rule or restriction")\n- recall_memory(mode="tasks", query="current work")\n- recall_memory(mode="profile", query="language or tone")\n- recall_memory(mode="verify", query="claim")',
+      description: 'Search memory for relevant classifications and episodes. Use silently.\n\nParameters:\n- mode: search | episodes\n- query: target event/topic/category description; optional for episodes when timerange-only browsing is intended\n- timerange: optional date filter, formats: "today", "this-week", "3d", "1w", "2026-03", "2026-03-28", "2026-03-25~2026-03-28"\n- type: optional search-only filter\n- source/context: episodes-only when trace or nearby turns are needed\n\nSearch guide:\n- date-only recall -> episodes + timerange\n- event/topic recall -> episodes + query (+ timerange if known)\n- broad long-term memory lookup -> search or classifications\n\nCanonical calls:\n- recall_memory(mode="episodes", timerange="2026-03-28")\n- recall_memory(mode="episodes", query="event", timerange="2026-03-28", context=2, source=true)\n- recall_memory(mode="search", query="topic or category")\n- recall_memory(mode="search", type="classifications", query="long-term memory")',
       inputSchema: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: 'Search text or shortcut. Shortcuts: "all", "hints", "hint:0,2", "facts", "episodes", "profiles", "tasks", "signals", "entities", "relations". Free text for normal recall. Optional in episodes mode if timerange-only browsing is intended.' },
-          mode: { type: 'string', enum: ['search', 'verify', 'episodes', 'bulk', 'tasks', 'policy', 'profile'], default: 'search', description: 'Recall strategy.' },
-          type: { type: 'string', enum: ['all', 'facts', 'tasks', 'signals', 'episodes', 'profiles', 'entities', 'relations'], default: 'all', description: 'Search-only memory type filter.' },
+          query: { type: 'string', description: 'Search text or shortcut. Shortcuts: "all", "hints", "hint:0,2", "classifications", "episodes". Free text for normal recall. Optional in episodes mode if timerange-only browsing is intended.' },
+          mode: { type: 'string', enum: ['search', 'episodes'], default: 'search', description: 'Recall strategy.' },
+          type: { type: 'string', enum: ['all', 'classifications', 'episodes'], default: 'all', description: 'Search-only memory type filter.' },
           timerange: { type: 'string', description: 'Time filter for all modes. Formats: "today", "this-week", "3d"(days), "1w"(weeks), "2026-03"(month), "2026-03-28"(date), "2026-03-25~2026-03-28"(range)' },
           limit: { type: 'number', default: 5, description: 'Max results' },
           source: { type: 'boolean', default: false, description: 'Episodes-only: include source trace.' },
           context: { type: ['number', 'string'], description: 'Episodes-only: surrounding turns count or "semantic".' },
           compact: { type: 'boolean', default: true, description: 'Use u/a shorthand for episodes' },
-          memory_kind: { type: 'string', enum: ['fact', 'task', 'signal', 'profile', 'entity', 'relation', 'episode', 'proposition'], description: 'Optional metadata filter for a specific memory kind.' },
-          task_status: { type: 'string', enum: ['active', 'in_progress', 'paused', 'done'], description: 'Optional metadata filter for task status.' },
+          memory_kind: { type: 'string', enum: ['classification', 'episode'], description: 'Optional metadata filter for a specific memory kind.' },
           source_type: { type: 'string', description: 'Optional metadata filter for source kind/backend, e.g. message, transcript, discord, claude-session.' },
           session_id: { type: 'string', description: 'Optional metadata filter for a specific source session id.' },
           start_ts: { type: 'string', description: 'Optional timestamp lower bound for search results, e.g. "2026-04-01T09:00:00".' },
@@ -848,7 +771,6 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           trace: { type: 'boolean', default: false, description: 'Persist a retrieval trace JSONL record under history for later inspection.' },
           debug: { type: 'boolean', default: false, description: 'Include query plan / candidate / rerank debug summary for inspection.' },
           until_stage: { type: 'string', enum: ['intent', 'plan', 'candidates', 'combined', 'exact', 'verified', 'rerank', 'final'], description: 'Stop the hybrid recall pipeline after the specified stage and return stage debug payload.' },
-          hints: { type: 'array', items: { type: 'string' }, description: 'Bulk-only: hint list to verify.' },
         },
         required: [],
       },
@@ -929,10 +851,8 @@ const httpServer = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     try {
       const episodeCount = store.countEpisodes()
-      const factsCount = store.db.prepare('SELECT COUNT(*) AS n FROM facts WHERE status = ?').get('active')?.n ?? 0
-      const tasksCount = store.db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE status IN (?, ?, ?)').get('active', 'in_progress', 'paused')?.n ?? 0
-      const signalsCount = store.db.prepare('SELECT COUNT(*) AS n FROM signals').get()?.n ?? 0
-      sendJson(res, { status: 'ok', episodeCount, factsCount, tasksCount, signalsCount })
+      const classificationCount = store.db.prepare('SELECT COUNT(*) AS n FROM classifications WHERE status = ?').get('active')?.n ?? 0
+      sendJson(res, { status: 'ok', episodeCount, classificationCount })
     } catch (e) {
       sendError(res, e.message)
     }
@@ -1071,6 +991,7 @@ process.stderr.write('[memory-service] MCP stdio connected\n')
 function shutdown() {
   process.stderr.write('[memory-service] shutting down...\n')
   try { temporalProcess?.kill() } catch {}
+  void stopLlmWorker().catch(() => {})
   removePortFile()
   void mcp.close()
   httpServer.close(() => process.exit(0))

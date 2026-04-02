@@ -1,8 +1,14 @@
 /**
- * embedding-provider.mjs — Delegates embedding to Python ML service.
+ * embedding-provider.mjs — Embedding provider abstraction.
  *
- * Reads ML service port from $TMPDIR/trib-memory/ml-port.
- * Falls back to local ONNX model if ML service is unavailable.
+ * Default path:
+ *   local bge-m3 via Ollama
+ *
+ * Optional path:
+ *   Python ML service (/embed) when explicitly enabled
+ *
+ * Last-resort path:
+ *   local Xenova bge-m3
  */
 
 import { readFileSync } from 'fs'
@@ -11,6 +17,8 @@ import { tmpdir } from 'os'
 
 const LOCAL_MODEL = 'Xenova/bge-m3'
 const LOCAL_DIMS = 1024
+const DEFAULT_PROVIDER = 'ollama'
+const DEFAULT_OLLAMA_MODEL = 'bge-m3'
 const ML_PORT_FILE = join(tmpdir(), 'trib-memory', 'ml-port')
 const ML_TIMEOUT_MS = Number(process.env.CLAUDE2BOT_ML_TIMEOUT_MS || 15000)
 const ML_WARMUP_RETRIES = 3
@@ -20,6 +28,9 @@ let extractorPromise = null
 let cachedDims = null
 let lastProviderSwitch = null
 let mlServiceAvailable = null  // null = unknown, true/false = tested
+let ollamaAvailable = null
+let configuredProvider = DEFAULT_PROVIDER
+let configuredOllamaModel = DEFAULT_OLLAMA_MODEL
 const queryEmbeddingCache = new Map()
 const QUERY_EMBEDDING_CACHE_LIMIT = 1000
 
@@ -35,10 +46,11 @@ function readMlPort() {
   }
 }
 
-function fallbackToLocal(reason, error = null) {
-  if (mlServiceAvailable === false) return  // already fallen back
-  const previousModelId = 'ml-service/bge-m3'
+function activateLocalXenova(reason, error = null) {
+  const previousModelId = getEmbeddingModelId()
   mlServiceAvailable = false
+  ollamaAvailable = false
+  configuredProvider = 'xenova'
   extractorPromise = null
   cachedDims = LOCAL_DIMS
   lastProviderSwitch = {
@@ -48,7 +60,7 @@ function fallbackToLocal(reason, error = null) {
     reason,
   }
   const suffix = error instanceof Error ? `: ${error.message}` : ''
-  process.stderr.write(`[embed] ${reason}; falling back to local ${LOCAL_MODEL}${suffix}\n`)
+  process.stderr.write(`[embed] ${reason}; using local ${LOCAL_MODEL}${suffix}\n`)
 }
 
 function cacheEmbedding(key, vector) {
@@ -72,11 +84,22 @@ function shouldForceLocalEmbedding() {
   return process.env.TRIB_MEMORY_FORCE_LOCAL_EMBEDDING === '1'
 }
 
+function shouldUseMlService() {
+  return process.env.TRIB_MEMORY_ENABLE_ML_SERVICE === '1' || configuredProvider === 'ml-service'
+}
+
+function shouldUseOllamaEmbedding() {
+  return !shouldForceLocalEmbedding() && !shouldUseMlService() && (configuredProvider === 'ollama' || configuredProvider === 'local')
+}
+
 export function configureEmbedding(config = {}) {
   // Reset cached state — ML service port may have changed
+  configuredProvider = String(config.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER
+  configuredOllamaModel = String(config.ollamaModel ?? DEFAULT_OLLAMA_MODEL).trim() || DEFAULT_OLLAMA_MODEL
   extractorPromise = null
   cachedDims = null
   mlServiceAvailable = null
+  ollamaAvailable = null
   queryEmbeddingCache.clear()
 }
 
@@ -93,6 +116,22 @@ async function loadExtractor() {
     })()
   }
   return extractorPromise
+}
+
+async function ollamaEmbed(text, timeoutMs = ML_TIMEOUT_MS) {
+  const resp = await fetch('http://127.0.0.1:11434/api/embed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: configuredOllamaModel || DEFAULT_OLLAMA_MODEL,
+      input: text,
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!resp.ok) throw new Error(`Ollama ${resp.status}: ${resp.statusText}`)
+  const data = await resp.json()
+  const vector = Array.isArray(data?.embeddings?.[0]) ? data.embeddings[0] : []
+  return new Float32Array(vector)
 }
 
 async function mlEmbed(text, timeoutMs = ML_TIMEOUT_MS) {
@@ -116,7 +155,10 @@ async function mlEmbed(text, timeoutMs = ML_TIMEOUT_MS) {
 }
 
 export function getEmbeddingModelId() {
-  return mlServiceAvailable === false ? LOCAL_MODEL : 'ml-service/bge-m3'
+  if (configuredProvider === 'xenova') return LOCAL_MODEL
+  if (shouldUseMlService() && mlServiceAvailable !== false) return 'ml-service/bge-m3'
+  if (shouldUseOllamaEmbedding() && ollamaAvailable !== false) return `ollama/${configuredOllamaModel || DEFAULT_OLLAMA_MODEL}`
+  return LOCAL_MODEL
 }
 
 export function getEmbeddingDims() {
@@ -132,30 +174,45 @@ export function consumeProviderSwitchEvent() {
 
 export async function warmupEmbeddingProvider() {
   if (shouldForceLocalEmbedding()) {
-    fallbackToLocal('forced local embedding')
+    activateLocalXenova('forced local embedding')
     const extractor = await loadExtractor()
     await extractor('warmup', { pooling: 'mean', normalize: true })
     cachedDims = LOCAL_DIMS
     return true
   }
-  // Try ML service first
-  for (let attempt = 1; attempt <= ML_WARMUP_RETRIES; attempt += 1) {
+
+  if (shouldUseOllamaEmbedding()) {
     try {
-      const vec = await mlEmbed('warmup')
+      const vec = await ollamaEmbed('warmup')
       cachedDims = vec.length
-      mlServiceAvailable = true
-      process.stderr.write(`[embed] ML service connected. dims=${cachedDims}\n`)
+      ollamaAvailable = true
+      mlServiceAvailable = false
+      process.stderr.write(`[embed] Ollama ${configuredOllamaModel} connected. dims=${cachedDims}\n`)
       return true
     } catch (e) {
-      if (attempt < ML_WARMUP_RETRIES) {
-        process.stderr.write(`[embed] ML service warmup retry ${attempt}/${ML_WARMUP_RETRIES}: ${e.message}\n`)
-        await sleep(ML_WARMUP_DELAY_MS)
+      process.stderr.write(`[embed] Ollama ${configuredOllamaModel} unavailable: ${e.message}\n`)
+    }
+  }
+
+  if (shouldUseMlService()) {
+    for (let attempt = 1; attempt <= ML_WARMUP_RETRIES; attempt += 1) {
+      try {
+        const vec = await mlEmbed('warmup')
+        cachedDims = vec.length
+        mlServiceAvailable = true
+        ollamaAvailable = false
+        process.stderr.write(`[embed] ML service connected. dims=${cachedDims}\n`)
+        return true
+      } catch (e) {
+        if (attempt < ML_WARMUP_RETRIES) {
+          process.stderr.write(`[embed] ML service warmup retry ${attempt}/${ML_WARMUP_RETRIES}: ${e.message}\n`)
+          await sleep(ML_WARMUP_DELAY_MS)
+        }
       }
     }
   }
 
-  // Fall back to local ONNX
-  fallbackToLocal('ML service warmup failed')
+  activateLocalXenova('default embedding warmup failed')
   const extractor = await loadExtractor()
   await extractor('warmup', { pooling: 'mean', normalize: true })
   cachedDims = LOCAL_DIMS
@@ -170,7 +227,7 @@ export async function embedText(text) {
   if (cached) return [...cached]
 
   if (shouldForceLocalEmbedding()) {
-    if (mlServiceAvailable !== false) fallbackToLocal('forced local embedding')
+    if (configuredProvider !== 'xenova') activateLocalXenova('forced local embedding')
     const extractor = await loadExtractor()
     const output = await extractor(clean, { pooling: 'mean', normalize: true })
     cachedDims = LOCAL_DIMS
@@ -179,21 +236,34 @@ export async function embedText(text) {
     return vector
   }
 
-  // Try ML service if available (or unknown)
-  if (mlServiceAvailable !== false) {
+  if (shouldUseOllamaEmbedding() && ollamaAvailable !== false) {
     try {
-      const vec = await mlEmbed(clean)
+      const vec = await ollamaEmbed(clean)
       if (!cachedDims && vec.length > 0) cachedDims = vec.length
-      mlServiceAvailable = true
+      ollamaAvailable = true
+      mlServiceAvailable = false
       const vector = Array.from(vec)
       cacheEmbedding(cacheKey, vector)
       return vector
     } catch (e) {
-      fallbackToLocal('ML service embedding request failed', e)
+      process.stderr.write(`[embed] Ollama ${configuredOllamaModel} request failed: ${e.message}\n`)
     }
   }
 
-  // Local ONNX fallback
+  if (shouldUseMlService() && mlServiceAvailable !== false) {
+    try {
+      const vec = await mlEmbed(clean)
+      if (!cachedDims && vec.length > 0) cachedDims = vec.length
+      mlServiceAvailable = true
+      ollamaAvailable = false
+      const vector = Array.from(vec)
+      cacheEmbedding(cacheKey, vector)
+      return vector
+    } catch (e) {
+      activateLocalXenova('ML service embedding request failed', e)
+    }
+  }
+
   const extractor = await loadExtractor()
   const output = await extractor(clean, { pooling: 'mean', normalize: true })
   cachedDims = LOCAL_DIMS

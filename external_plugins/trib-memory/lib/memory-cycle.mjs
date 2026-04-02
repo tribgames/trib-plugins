@@ -3,7 +3,6 @@
  * Standalone memory consolidation module.
  */
 
-import { execFileSync } from 'child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { join } from 'path'
@@ -91,10 +90,8 @@ export function saveCycleState(state) {
   writeFileSync(CYCLE_STATE_PATH, JSON.stringify(state, null, 2) + '\n', 'utf8')
 }
 
-const claudeCmd = process.platform === 'win32' ? 'claude.cmd' : 'claude'
 const MAX_MEMORY_CONSOLIDATE_DAYS = 2
 const MAX_MEMORY_CANDIDATES_PER_DAY = 40
-const MAX_MEMORY_CONSOLIDATE_BATCHES_PER_DAY = 4
 const MAX_MEMORY_CONTEXTUALIZE_ITEMS = 24
 const MEMORY_FLUSH_DEFAULT_MAX_DAYS = 1
 const MEMORY_FLUSH_DEFAULT_MAX_CANDIDATES = 20
@@ -152,33 +149,6 @@ function resourceDir() {
   return join(PLUGIN_DATA_DIR, '..', '..', 'cache', 'trib-memory', 'trib-memory', '0.0.1')
 }
 
-function claudeMemoryPromptArgs() {
-  const config = readMainConfig()
-  const cliConfig = config?.memory?.cliFallback ?? {}
-  return [
-    '-p',
-    '--dangerously-skip-permissions',
-    '--no-session-persistence',
-    '--plugin-dir', join(tmpdir(), 'trib-memory-noplugin'),
-    '--model', cliConfig.model || 'sonnet',
-    '--effort', cliConfig.effort || 'medium',
-  ]
-}
-
-function execClaudePrompt(prompt, options = {}) {
-  mkdirSync(join(tmpdir(), 'trib-memory-noplugin'), { recursive: true })
-  return execFileSync(claudeCmd, [
-    ...claudeMemoryPromptArgs(),
-    '--prompt', prompt,
-  ], {
-    cwd: options.cwd ?? process.cwd(),
-    encoding: 'utf8',
-    timeout: Number(options.timeout ?? 120000) + 2000,
-    env: { ...process.env, CLAUDE2BOT_NO_CONNECT: '1', TRIB_SEARCH_SPAWNED: '1' },
-  }).trim()
-}
-
-
 function extractJsonObject(text) {
   const trimmed = String(text ?? '').trim()
   if (!trimmed) return null
@@ -190,51 +160,40 @@ function extractJsonObject(text) {
   try { return JSON.parse(candidate.slice(start, end + 1)) } catch { return null }
 }
 
+function parseClassificationCsv(text) {
+  const trimmed = String(text ?? '').trim()
+  if (!trimmed) return null
+  const fenced = trimmed.match(/```(?:csv)?\s*([\s\S]*?)```/i)
+  const body = fenced ? fenced[1].trim() : trimmed
+  const lines = body.split('\n').map(l => l.trim()).filter(Boolean)
+  const startIdx = lines[0]?.toLowerCase().includes('case_id') ? 1 : 0
+  const items = []
+  for (let i = startIdx; i < lines.length; i++) {
+    // CSV 파싱: 따옴표 안의 쉼표 보호
+    const parts = []
+    let cur = '', inQuote = false
+    for (const ch of lines[i]) {
+      if (ch === '"') { inQuote = !inQuote; continue }
+      if (ch === ',' && !inQuote) { parts.push(cur.trim()); cur = ''; continue }
+      cur += ch
+    }
+    parts.push(cur.trim())
+    if (parts.length < 3) continue
+    // case_id,text,classification,topic,element,state
+    items.push({
+      case_id: parts[0],
+      classification: parts[2] || '',
+      topic: parts[3] || '',
+      element: parts[4] || '',
+      state: parts[5] || '',
+    })
+  }
+  return items.length > 0 ? { items } : null
+}
+
 // Delegate to shared implementation
 function cosineSimilarity(a, b) {
   return cosineSimilarityShared(a, b)
-}
-
-function detectSlotConflict(existingMem, candidateTexts) {
-  const memText = String(existingMem.content || existingMem.text || '').toLowerCase()
-  const memSubtype = String(existingMem.subtype || '').toLowerCase()
-  for (const ct of candidateTexts) {
-    const candLower = ct.toLowerCase()
-    // Same subtype/slot with different value → conflict
-    if (memSubtype && candLower.includes(memSubtype)) {
-      // Check if the value portion differs
-      const memValue = memText.replace(new RegExp(`.*${memSubtype}[:\\s]*`, 'i'), '').trim()
-      const candValue = candLower.replace(new RegExp(`.*${memSubtype}[:\\s]*`, 'i'), '').trim()
-      if (memValue && candValue && memValue !== candValue) return true
-    }
-    // Entity overlap with different value: same subject but contradicting statement
-    const memWords = new Set(memText.split(/\s+/).filter(w => w.length > 3))
-    const candWords = new Set(candLower.split(/\s+/).filter(w => w.length > 3))
-    const overlap = [...memWords].filter(w => candWords.has(w)).length
-    const overlapRatio = memWords.size > 0 ? overlap / memWords.size : 0
-    // High word overlap (same entity) but not identical text → potential conflict
-    if (overlapRatio > 0.5 && memText !== candLower) {
-      const score = existingMem.score ?? 0
-      if (score >= 0.6 && score < 0.85) return true
-    }
-  }
-  return false
-}
-
-function tagExistingMemories(existingMemories, candidateTexts) {
-  return existingMemories.map(m => {
-    const score = m.score ?? 0
-    const text = m.content || m.text || ''
-    const isConflict = detectSlotConflict(m, candidateTexts)
-    let tag = ''
-    if (isConflict) {
-      tag = '[conflict]'
-    } else if (score >= 0.7) {
-      tag = '[similar]'
-    }
-    const suffix = isConflict ? ' — may conflict with newer input' : ''
-    return { ...m, tag, formatted: tag ? `${tag} "${text}" (score: ${score.toFixed(2)})${suffix}` : `"${text}" (score: ${score.toFixed(2)})` }
-  })
 }
 
 function percentile(values, p) {
@@ -246,7 +205,10 @@ function percentile(values, p) {
 export async function buildSemanticDayPlan(dayEpisodes) {
   const rows = dayEpisodes.map((ep, i) => ({ index: i, id: ep.id, role: ep.role, content: cleanMemoryText(ep.content ?? '') })).filter(r => r.content)
   if (rows.length <= 1) return { rows, segments: rows.length ? [{ start: 0, end: rows.length - 1 }] : [], threshold: 1 }
-  const vectors = await Promise.all(rows.map(r => embedText(String(r.content).slice(0, 320))))
+  const vectors = []
+  for (const row of rows) {
+    vectors.push(await embedText(String(row.content).slice(0, 320)))
+  }
   const similarities = []
   for (let i = 0; i < vectors.length - 1; i++) similarities.push(cosineSimilarity(vectors[i], vectors[i + 1]))
   const threshold = Math.max(0.42, percentile(similarities, 35))
@@ -312,75 +274,19 @@ async function resolveCycleLlmOutput(prompt, ws, options = {}) {
       candidates: options.candidates ?? [],
     })
   }
-  if (options.provider) {
-    return await callLLM(prompt, options.provider, { timeout: options.timeout ?? 180000, cwd: ws })
-  }
-  return execClaudePrompt(prompt, { cwd: ws, timeout: options.timeout ?? 180000 })
+  const provider = options.provider || readMainConfig()?.memory?.cycle1?.provider || DEFAULT_CYCLE_PROVIDER
+  return await callLLM(prompt, provider, { timeout: options.timeout ?? 180000, cwd: ws })
 }
 
 // ── Public API ──
 
-export async function consolidateCandidateDay(dayKey, ws, options = {}) {
+export async function consolidateCandidateDay(dayKey, _ws, options = {}) {
   const store = options.store ?? getStore()
   const maxPerBatch = Math.max(1, Number(options.maxCandidatesPerBatch ?? MAX_MEMORY_CANDIDATES_PER_DAY))
-  const maxBatches = Math.max(1, Number(options.maxBatches ?? MAX_MEMORY_CONSOLIDATE_BATCHES_PER_DAY))
-  const provider = options.provider ?? readMainConfig()?.memory?.cycle2?.provider ?? null
-  let processed = 0, mergedFacts = 0, mergedTasks = 0, mergedSignals = 0
-  let linksDirty = false
-
-  const promptPath = join(resourceDir(), 'defaults', 'memory-consolidate-prompt.md')
-  const template = existsSync(promptPath) ? readFileSync(promptPath, 'utf8') : 'Output JSON only with facts/tasks/signals.'
-  const dayEpisodes = store.getEpisodesForDate(dayKey)
-
-  for (let batch = 0; batch < maxBatches; batch++) {
-    const candidates = await prepareConsolidationCandidates(store.getCandidatesForDate(dayKey), maxPerBatch, dayEpisodes)
-    if (candidates.length === 0) break
-    const candidateText = candidates.map((item, i) => `#${i + 1} [${item.role}] score=${item.score}\nCandidate:\n${String(item.content).slice(0, 300)}\nContext:\n${String(item.span_content).slice(0, 800)}`).join('\n\n')
-
-    // Inject existing related memories with [similar]/[conflict] tags
-    let existingMemorySection = ''
-    try {
-      const searchQuery = candidates.map(c => String(c.content).slice(0, 80)).join(' ')
-      const existingMemories = await store.searchRelevantHybrid(searchQuery, 5)
-      if (existingMemories && existingMemories.length > 0) {
-        const candidateTexts = candidates.map(c => String(c.content).slice(0, 300))
-        const tagged = tagExistingMemories(existingMemories, candidateTexts)
-        const memLines = tagged.map((m, i) => `${i + 1}. [${m.type}] ${m.formatted}`).join('\n')
-        existingMemorySection = `\n\nExisting memories (skip duplicates, note changes):\n${memLines}\nNote: If contradictory information exists, prioritize the most recent.\n`
-      }
-    } catch { /* best effort */ }
-
-    const prompt = template.replace('{{DATE}}', dayKey).replace('{{CANDIDATES}}', candidateText + existingMemorySection)
-    try {
-      const raw = await resolveCycleLlmOutput(prompt, ws, {
-        ...options,
-        mode: 'cycle2',
-        provider,
-        dayKey,
-        batchIndex: batch,
-        candidates,
-        timeout: 180000,
-      })
-      const parsed = extractJsonObject(raw)
-      if (!parsed) { process.stderr.write(`[memory-cycle] consolidate ${dayKey}: invalid JSON\n`); break }
-      const srcEp = candidates[0]?.episode_id ?? null
-      const ts = `${dayKey}T23:59:59.000Z`
-      store.upsertProfiles(parsed.profiles ?? [], ts, srcEp)
-      store.upsertEntities(parsed.entities ?? [], ts, srcEp)
-      await store.upsertFacts(parsed.facts ?? [], ts, srcEp)
-      store.upsertTasks(parsed.tasks ?? [], ts, srcEp)
-      store.upsertSignals(parsed.signals ?? [], srcEp, ts)
-      store.upsertRelations(parsed.relations ?? [], ts, srcEp)
-      linksDirty = true
-      store.markCandidateIdsConsolidated(candidates.map(item => item.id))
-      processed += candidates.length
-      mergedFacts += (parsed.facts ?? []).length
-      mergedTasks += (parsed.tasks ?? []).length
-      mergedSignals += (parsed.signals ?? []).length
-    } catch (e) { process.stderr.write(`[memory-cycle] consolidate ${dayKey} failed: ${e.message}\n`); break }
-  }
-  if (linksDirty) store.rebuildEntityLinks()
-  if (processed > 0) process.stderr.write(`[memory-cycle] consolidated ${dayKey}: candidates=${processed}, facts=${mergedFacts}, tasks=${mergedTasks}, signals=${mergedSignals}\n`)
+  const candidates = await prepareConsolidationCandidates(store.getCandidatesForDate(dayKey), maxPerBatch, store.getEpisodesForDate(dayKey))
+  if (candidates.length === 0) return
+  store.markCandidateIdsConsolidated(candidates.map(item => item.id))
+  process.stderr.write(`[memory-cycle] consolidated ${dayKey}: candidates=${candidates.length}, mode=classification-only\n`)
 }
 
 export async function consolidateRecent(dayKeys, ws, options = {}) {
@@ -648,145 +554,122 @@ function looksLowSignalCycle1(text) {
   return false
 }
 
-function loadCycle1Prompt() {
-  const promptPath = join(resourceDir(), 'defaults', 'memory-cycle1-prompt.md')
+function loadClassificationPrompt() {
+  const promptPath = join(resourceDir(), 'defaults', 'memory-classification-prompt.md')
   if (existsSync(promptPath)) return readFileSync(promptPath, 'utf8')
-  return 'Extract durable memory from candidates. Output JSON only with profiles/facts/tasks/signals/entities/relations.\n\n{{CANDIDATES}}'
+  return 'Fill the missing classification columns for each row. Output JSON only.\n\n{{ROWS}}'
+}
+
+function csvEscape(value) {
+  const s = String(value ?? '').replace(/\n/g, ' ').trim()
+  return s.includes(',') || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s
+}
+
+function buildCycle1ClassificationRows(candidates = []) {
+  return candidates.map(candidate => {
+    const text = csvEscape(candidate.content?.slice(0, 150) || '')
+    return [candidate.episode_id, text, '', '', '', ''].join(',')
+  }).join('\n')
 }
 
 const DEFAULT_CYCLE_PROVIDER = { connection: 'codex', model: 'gpt-5.4', effort: 'medium', fast: true }
-const MAX_CYCLE1_CANDIDATES_PER_BATCH = 50
-const MAX_CYCLE1_BATCHES = 5
 
 async function runCycle1Impl(ws, config, options = {}) {
   const store = options.store ?? getStore()
   const cycleConfig = readCycleConfig()
-  const lastRun = cycleConfig.lastCycle1At || 0
+  const force = Boolean(options.force)
 
-  // Get new episodes since last run
-  const newEpisodes = store.getEpisodesSince(lastRun)
-  const hasNewEpisodes = Array.isArray(newEpisodes) && newEpisodes.length > 0
-
-  // Filter: user + assistant messages, clean + low-signal filter
-  const allCandidates = (hasNewEpisodes ? newEpisodes : [])
-    .filter(e => e.kind === 'message' && (e.role === 'user' || e.role === 'assistant'))
-    .map(e => ({ ...e, content: cleanMemoryText(e.content) }))
-    .filter(e => e.content && !looksLowSignalCycle1(e.content))
-
-  const maxPerBatch = Math.max(1, Number(config?.memory?.cycle1?.maxCandidatesPerBatch ?? MAX_CYCLE1_CANDIDATES_PER_BATCH))
-  const maxBatches = Math.max(1, Number(config?.memory?.cycle1?.maxBatches ?? MAX_CYCLE1_BATCHES))
+  const cycle1Config = config?.memory?.cycle1 ?? {}
+  const batchSize = Math.max(1, Number(cycle1Config.batchSize ?? 50))
+  const maxDays = force ? 9999 : Math.max(1, Number(cycle1Config.maxDays ?? 7))
   const provider = config?.memory?.cycle1?.provider || DEFAULT_CYCLE_PROVIDER
   const timeout = config?.memory?.cycle1?.timeout || 60000
 
-  let totalExtracted = 0, totalFacts = 0, totalTasks = 0, totalSignals = 0
-  const cycle2Provider = config?.memory?.cycle2?.provider ?? DEFAULT_CYCLE_PROVIDER
-  let linksDirty = false
+  // pending candidates를 최근 maxDays 범위에서 가져옴
+  // getCandidatesForDate는 이미 status='pending'만 반환
+  const pendingDays = store.getPendingCandidateDays(maxDays, 1)
+  if (pendingDays.length === 0) {
+    writeCycleConfig({ ...cycleConfig, lastCycle1At: Date.now() })
+    return { extracted: 0, classifications: 0 }
+  }
 
-  for (let batch = 0; batch < maxBatches && allCandidates.length > 0; batch++) {
-    const start = batch * maxPerBatch
-    if (start >= allCandidates.length) break
-    const candidates = allCandidates.slice(start, start + maxPerBatch)
+  const allCandidates = []
+  for (const { day_key } of pendingDays.sort((a, b) => b.day_key.localeCompare(a.day_key))) {
+    const dayCandidates = store.getCandidatesForDate(day_key)
+      .map(c => ({ ...c, content: cleanMemoryText(c.content) }))
+      .filter(c => c.content && !looksLowSignalCycle1(c.content))
+    allCandidates.push(...dayCandidates)
+    if (!force && allCandidates.length >= batchSize) break
+  }
+  if (allCandidates.length === 0) {
+    writeCycleConfig({ ...cycleConfig, lastCycle1At: Date.now() })
+    return { extracted: 0, classifications: 0 }
+  }
 
-    // Build prompt
-    const candidateText = candidates
-      .map((c, i) => `#${i + 1} [${c.role}]: ${c.content.slice(0, 300)}`)
-      .join('\n\n')
+  let totalExtracted = 0, totalClassifications = 0
 
-    // Inject existing related memories with [similar]/[conflict] tags
-    let existingMemorySection = ''
-    try {
-      const searchQuery = candidates.map(c => c.content.slice(0, 80)).join(' ')
-      const existingMemories = await store.searchRelevantHybrid(searchQuery, 5)
-      if (existingMemories && existingMemories.length > 0) {
-        const candidateTexts = candidates.map(c => c.content.slice(0, 300))
-        const tagged = tagExistingMemories(existingMemories, candidateTexts)
-        const memLines = tagged.map((m, i) => `${i + 1}. [${m.type}] ${m.formatted}`).join('\n')
-        existingMemorySection = `\n\nExisting memories (skip duplicates, note changes):\n${memLines}\nNote: If contradictory information exists, prioritize the most recent.\n`
-      }
-    } catch { /* best effort */ }
+  // force: 전체 pending을 batchSize씩 연속 처리 / 주기: batchSize 1회
+  const batches = []
+  for (let i = 0; i < allCandidates.length; i += batchSize) {
+    batches.push(allCandidates.slice(i, i + batchSize))
+    if (!force) break
+  }
 
-    const extractionPrompt = loadCycle1Prompt()
-      .replace('{{TODAY}}', new Date().toISOString().slice(0, 10))
-      .replace('{{CANDIDATES}}', candidateText + existingMemorySection)
-      + `\n\nAdditional extraction rules:\n`
-      + `- For development/code tasks, set workstream as dev/{project}/{area} when possible.\n`
-      + `- For non-development tasks, use general/{category}.\n`
-      + `- For task objects, include scope as work or personal.\n`
-      + `- For task objects, include activity as one of coding, research, planning, communication, ops when possible.\n`
-      + `- For task objects, include current_state as a single-line summary when the current state is clear.\n`
-      + `- For task objects, include next_step when the next action is mentioned or implied.\n`
-      + `- Keep current_state and next_step concise.\n`
+  for (let bi = 0; bi < batches.length; bi++) {
+    const candidates = batches[bi]
+    const extractionPrompt = loadClassificationPrompt()
+      .replace('{{ROWS}}', buildCycle1ClassificationRows(candidates))
 
-    // Call LLM via provider abstraction
     let raw
     try {
       raw = await resolveCycleLlmOutput(extractionPrompt, ws, {
         ...options,
         mode: 'cycle1',
-        batchIndex: batch,
+        batchIndex: bi,
         candidates,
         provider,
         timeout,
       })
     } catch (e) {
-      process.stderr.write(`[memory-cycle1] batch ${batch} LLM error: ${e.message}\n`)
+      process.stderr.write(`[cycle1] batch ${bi} LLM error: ${e.message}\n`)
       break
     }
 
-    // Parse and upsert
-    const parsed = extractJsonObject(raw)
+    const parsed = extractJsonObject(raw) || parseClassificationCsv(raw)
     if (!parsed) {
-      process.stderr.write(`[memory-cycle1] batch ${batch}: invalid JSON\n`)
+      process.stderr.write(`[cycle1] batch ${bi}: unparseable response\n`)
       continue
     }
 
     const ts = new Date().toISOString()
-    const srcEp = candidates[0]?.id ?? null
-    if (parsed.profiles) store.upsertProfiles(parsed.profiles, ts, srcEp)
-    if (parsed.entities) store.upsertEntities(parsed.entities, ts, srcEp)
-    if (parsed.facts) await store.upsertFacts(parsed.facts, ts, srcEp)
-    if (parsed.tasks) store.upsertTasks(parsed.tasks, ts, srcEp)
-    if (parsed.signals) store.upsertSignals(parsed.signals, srcEp, ts)
-    if (parsed.relations) store.upsertRelations(parsed.relations, ts, srcEp)
-    linksDirty = true
+    const classificationRows = Array.isArray(parsed.items)
+      ? parsed.items.map(item => ({
+          episode_id: Number(item?.case_id ?? 0),
+          classification: String(item?.classification ?? '').trim(),
+          topic: String(item?.topic ?? '').trim(),
+          element: String(item?.element ?? '').trim(),
+          state: String(item?.state ?? '').trim(),
+          confidence: Number(item?.confidence ?? 0.6),
+        }))
+      : []
+    store.upsertClassifications(classificationRows, ts, null)
 
-    // cycle1이 처리한 에피소드의 candidate를 consolidated로 마킹 (cycle2 중복 방지)
-    const processedEpisodeIds = candidates.map(c => c.id).filter(id => id != null)
-    if (processedEpisodeIds.length > 0) {
-      const placeholders = processedEpisodeIds.map(() => '?').join(',')
+    // 처리된 candidates를 consolidated로 마킹
+    const processedIds = candidates.map(c => c.id).filter(id => id != null)
+    if (processedIds.length > 0) {
+      const placeholders = processedIds.map(() => '?').join(',')
       store.db.prepare(`
         UPDATE memory_candidates SET status = 'consolidated'
-        WHERE episode_id IN (${placeholders}) AND status = 'pending'
-      `).run(...processedEpisodeIds)
+        WHERE id IN (${placeholders}) AND status = 'pending'
+      `).run(...processedIds)
     }
 
     totalExtracted += candidates.length
-    totalFacts += (parsed.facts || []).length
-    totalTasks += (parsed.tasks || []).length
-    totalSignals += (parsed.signals || []).length
+    totalClassifications += classificationRows.length
+    process.stderr.write(`[cycle1] batch ${bi}: ${candidates.length} candidates → ${classificationRows.length} classifications\n`)
   }
 
-  const pendingDays = store.getPendingCandidateDays(2, 1).map(d => d.day_key).sort()
-  if (allCandidates.length === 0 && pendingDays.length === 0) {
-    writeCycleConfig({ ...cycleConfig, lastCycle1At: Date.now() })
-    const cycleState = loadCycleState()
-    cycleState.cycle1.lastRunAt = new Date().toISOString()
-    saveCycleState(cycleState)
-    return { extracted: 0, facts: 0, tasks: 0, signals: 0 }
-  }
-  if (pendingDays.length > 0) {
-    await consolidateRecent(pendingDays, ws, {
-      store,
-      provider: cycle2Provider,
-      maxDays: 1,
-      maxCandidatesPerBatch: 20,
-      maxBatches: 2,
-    })
-  }
-
-  if (totalExtracted > 0 || pendingDays.length > 0) {
-    if (linksDirty) store.rebuildEntityLinks()
-    store.syncHistoryFromFiles()
+  if (totalExtracted > 0) {
     await refreshEmbeddings(ws, { store, kind: 'cycle1' })
     store.writeContextFile()
   }
@@ -800,12 +683,10 @@ async function runCycle1Impl(ws, config, options = {}) {
 
   const result = {
     extracted: totalExtracted,
-    facts: totalFacts,
-    tasks: totalTasks,
-    signals: totalSignals,
+    classifications: totalClassifications,
   }
   if (totalExtracted > 0) {
-    process.stderr.write(`[memory-cycle1] extracted=${result.extracted} facts=${result.facts} tasks=${result.tasks} signals=${result.signals}\n`)
+    process.stderr.write(`[memory-cycle1] extracted=${result.extracted} classifications=${result.classifications}\n`)
   }
   return result
 }
@@ -858,53 +739,50 @@ async function runCycle3Impl(_ws, options = {}) {
 
   process.stderr.write(`[memory-cycle3] Starting decay cycle (threshold=${threshold}, graceDays=${graceDays})\n`)
 
-  let deprecatedFacts = 0, deprecatedTasks = 0, deprecatedSignals = 0
-  let deletedFacts = 0, deletedTasks = 0, deletedSignals = 0
+  let deprecatedClassifications = 0
+  let deletedClassifications = 0
 
-  // Phase 1: Compute heat scores and deprecate cold items (30일 미만 신규 항목 보호)
   const MIN_SURVIVAL_DAYS = 30
+  const rows = store.db.prepare(`
+    SELECT id, ts, retrieval_count, updated_at
+    FROM classifications
+    WHERE status = 'active'
+  `).all()
 
-  // Facts
-  const coldFactIds = store.getDecayRows('fact')
-    .filter(row => {
-      const firstSeen = row.first_seen ? new Date(row.first_seen).getTime() : 0
-      const ageDays = firstSeen ? (Date.now() - firstSeen) / 86400000 : 999
-      if (ageDays < MIN_SURVIVAL_DAYS) return false // 신규 fact 보호
-      return computeHeatScore(row) < threshold
-    })
-    .map(row => row.id)
-  deprecatedFacts = store.markRowsDeprecated('fact', coldFactIds, nowISO)
+  const coldIds = rows.filter(row => {
+    const firstSeen = row.ts ? new Date(row.ts).getTime() : 0
+    const ageDays = firstSeen ? (Date.now() - firstSeen) / 86400000 : 999
+    if (ageDays < MIN_SURVIVAL_DAYS) return false
+    return computeHeatScore({
+      mention_count: 1,
+      retrieval_count: row.retrieval_count,
+      last_seen: row.ts,
+    }) < threshold
+  }).map(row => row.id)
 
-  // Tasks
-  const coldTaskIds = store.getDecayRows('task')
-    .filter(row => {
-      const firstSeen = row.first_seen ? new Date(row.first_seen).getTime() : 0
-      const ageDays = firstSeen ? (Date.now() - firstSeen) / 86400000 : 999
-      if (ageDays < MIN_SURVIVAL_DAYS) return false
-      return computeHeatScore(row) < threshold
-    })
-    .map(row => row.id)
-  deprecatedTasks = store.markRowsDeprecated('task', coldTaskIds, nowISO)
+  if (coldIds.length > 0) {
+    const placeholders = coldIds.map(() => '?').join(',')
+    deprecatedClassifications = Number(store.db.prepare(`
+      UPDATE classifications
+      SET status = 'deprecated'
+      WHERE id IN (${placeholders})
+    `).run(...coldIds).changes ?? 0)
+  }
 
-  // Signals
-  const coldSignalIds = store.getDecayRows('signal')
-    .filter(row => {
-      const firstSeen = row.first_seen ? new Date(row.first_seen).getTime() : 0
-      const ageDays = firstSeen ? (Date.now() - firstSeen) / 86400000 : 999
-      if (ageDays < MIN_SURVIVAL_DAYS) return false
-      return computeHeatScore(row) < threshold
-    })
-    .map(row => row.id)
-  deprecatedSignals = store.markRowsDeprecated('signal', coldSignalIds, nowISO)
-
-  // Phase 2: Optional hard delete past grace period
   if (hardDelete) {
-    const graceThreshold = new Date(Date.now() - graceDays * 86400000).toISOString()
-    deletedFacts = store.deleteRowsByIds('fact', store.listDeprecatedIds('fact', graceThreshold))
-    deletedTasks = store.deleteRowsByIds('task', store.listDeprecatedIds('task', graceThreshold))
-    deletedSignals = store.deleteRowsByIds('signal', store.listDeprecatedIds('signal', graceThreshold))
-    if (deletedFacts + deletedTasks + deletedSignals > 0) {
-      store.vacuumDatabase()
+    const graceThreshold = new Date(Date.now() - graceDays * 86400000).getTime()
+    const deletable = store.db.prepare(`
+      SELECT id
+      FROM classifications
+      WHERE status = 'deprecated'
+        AND updated_at < ?
+    `).all(graceThreshold).map(row => row.id)
+    if (deletable.length > 0) {
+      const placeholders = deletable.map(() => '?').join(',')
+      deletedClassifications = Number(store.db.prepare(`
+        DELETE FROM classifications
+        WHERE id IN (${placeholders})
+      `).run(...deletable).changes ?? 0)
     }
   }
 
@@ -917,13 +795,13 @@ async function runCycle3Impl(_ws, options = {}) {
   saveCycleState(cycleState)
 
   const result = {
-    deprecated: { facts: deprecatedFacts, tasks: deprecatedTasks, signals: deprecatedSignals },
-    deleted: { facts: deletedFacts, tasks: deletedTasks, signals: deletedSignals },
+    deprecated: { classifications: deprecatedClassifications },
+    deleted: { classifications: deletedClassifications },
   }
 
   process.stderr.write(
-    `[memory-cycle3] deprecated: facts=${deprecatedFacts} tasks=${deprecatedTasks} signals=${deprecatedSignals} | ` +
-    `deleted: facts=${deletedFacts} tasks=${deletedTasks} signals=${deletedSignals}\n`
+    `[memory-cycle3] deprecated classifications=${deprecatedClassifications} | ` +
+    `deleted classifications=${deletedClassifications}\n`
   )
 
   return result

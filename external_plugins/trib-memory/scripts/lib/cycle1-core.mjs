@@ -9,10 +9,20 @@ function pluginRoot() {
   return resolve(import.meta.dirname, '..', '..')
 }
 
-export function loadCycle1Prompt() {
-  const promptPath = join(pluginRoot(), 'defaults', 'memory-cycle1-prompt.md')
-  if (existsSync(promptPath)) return readFileSync(promptPath, 'utf8')
+export function loadCycle1Prompt(promptPath = null) {
+  const resolved = promptPath ? resolve(String(promptPath)) : join(pluginRoot(), 'defaults', 'memory-cycle1-prompt.md')
+  if (existsSync(resolved)) return readFileSync(resolved, 'utf8')
   return 'Extract durable memory from recent user messages. Output JSON only.\n\n{{CANDIDATES}}'
+}
+
+export function resolveCycle1PromptTemplate(options = {}) {
+  if (typeof options.promptTemplate === 'string' && options.promptTemplate.trim()) {
+    return options.promptTemplate
+  }
+  if (options.promptPath) {
+    return loadCycle1Prompt(options.promptPath)
+  }
+  return loadCycle1Prompt()
 }
 
 export function extractJsonObject(text) {
@@ -40,8 +50,9 @@ export function normalizeCycle1Case(raw = {}) {
     const list = Array.isArray(value) ? value : []
     return list
       .map(item => {
-        if (typeof item === 'string') return { role: 'user', content: item.trim() }
+        if (typeof item === 'string') return { id: null, role: 'user', content: item.trim() }
         return {
+          id: item?.id != null ? String(item.id).trim() : null,
           role: String(item?.role ?? 'user').trim() || 'user',
           content: String(item?.content ?? '').trim(),
         }
@@ -77,12 +88,12 @@ export function loadCycle1Cases(filePath) {
   return parsed.map(item => normalizeCycle1Case(item)).filter(item => item.candidates.length > 0)
 }
 
-export function buildCycle1Prompt(testCase) {
+export function buildCycle1Prompt(testCase, options = {}) {
   const candidateText = testCase.candidates
     .map((candidate, index) => `#${index + 1} [${candidate.role}]: ${candidate.content.slice(0, 300)}`)
     .join('\n\n')
 
-  return loadCycle1Prompt()
+  return resolveCycle1PromptTemplate(options)
     .replace('{{TODAY}}', testCase.today)
     .replace('{{CANDIDATES}}', candidateText)
     + `\n\nAdditional extraction rules:\n`
@@ -138,7 +149,7 @@ function scoreExpected(expected = [], actual = []) {
 }
 
 export async function runCycle1Case(testCase, options = {}) {
-  const prompt = buildCycle1Prompt(testCase)
+  const prompt = buildCycle1Prompt(testCase, options)
   const provider = options.provider ?? defaultProvider(testCase)
   const timeout = Number(options.timeout ?? testCase.timeout ?? 60000)
   const raw = await callLLM(prompt, provider, { timeout, cwd: options.cwd ?? process.cwd() })
@@ -181,6 +192,7 @@ export async function runCycle1Benchmark(cases, options = {}) {
       scores: result.scores,
       outputs: result.outputs,
       parsed: result.parsed,
+      prompt: options.includePrompt ? result.prompt : undefined,
     })
     for (const key of Object.keys(totals)) {
       totals[key].hit1 += result.scores[key].hit1

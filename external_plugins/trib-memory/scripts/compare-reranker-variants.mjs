@@ -63,6 +63,7 @@ for (const modelId of models) {
     ], {
       env: {
         ...process.env,
+        TRIB_MEMORY_ENABLE_RERANKER: '1',
         TRIB_MEMORY_RERANKER_MODEL_ID: String(modelId),
       },
       encoding: 'utf8',

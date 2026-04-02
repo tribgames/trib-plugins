@@ -107,42 +107,30 @@ export function getResultDayKey(item) {
 
 export function getExactHistoryTypePriority(item) {
   if (item?.type === 'episode') return 0
-  if (item?.type === 'proposition') return 1
-  if (item?.type === 'task') return 2
-  if (item?.type === 'fact') return 3
+  if (item?.type === 'classification') return 1
   return 4
 }
 
 export function buildMemoryQueryPlan(query, intent, options = {}) {
   const clean = cleanMemoryText(query)
   const temporal = options.temporal ?? parseTemporalHint(clean)
-  const queryEntities = Array.isArray(options.queryEntities) ? options.queryEntities : []
   const includeDoneTasks = Boolean(options.includeDoneTasks) || isDoneTaskQuery(clean)
   const preferActiveTasks = Boolean(options.preferActiveTasks) || isOngoingTaskQuery(clean)
-  const explicitRelationQuery = isRelationQuery(clean)
-  const preferRelations = queryEntities.length > 0 && explicitRelationQuery
   const isHistoryExact = Boolean(temporal?.exact) && (intent?.primary === 'history' || intent?.primary === 'event')
   const filters = options.filters ?? {}
-  const retriever =
-    intent?.primary === 'profile' ? 'profile' :
-    intent?.primary === 'task' ? 'task' :
-    (intent?.primary === 'policy' || intent?.primary === 'security') ? 'policy' :
-    ((intent?.primary === 'decision') && preferRelations) ? 'graph' :
-    (intent?.primary === 'history' || intent?.primary === 'event') ? 'history' :
-    'decision'
+  const retriever = (intent?.primary === 'history' || intent?.primary === 'event') ? 'history' : 'decision'
 
   return {
     query: clean,
     intent,
     temporal,
-    queryEntities,
     includeDoneTasks,
     preferActiveTasks,
-    explicitRelationQuery,
-    preferRelations,
+    explicitRelationQuery: false,
+    preferRelations: false,
     isHistoryExact,
     retriever,
-    graphFirst: retriever === 'graph',
+    graphFirst: false,
     filters,
     limit: Math.max(1, Number(options.limit ?? 8)),
   }

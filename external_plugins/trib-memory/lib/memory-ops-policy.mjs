@@ -1,4 +1,8 @@
 const DEFAULT_OPS_POLICY = {
+  features: {
+    reranker: false,
+    temporalParser: false,
+  },
   startup: {
     backfill: {
       mode: 'if-empty',
@@ -63,8 +67,17 @@ function normalizeBackfillScope(value) {
   return 'all'
 }
 
+function envFlag(value, fallback = false) {
+  if (value == null || value === '') return fallback
+  const normalized = String(value).trim().toLowerCase()
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
+  return fallback
+}
+
 export function readMemoryOpsPolicy(mainConfig = {}) {
   const runtimeConfig = mainConfig?.memory?.runtime ?? {}
+  const featuresConfig = runtimeConfig?.features ?? {}
   const startupConfig = runtimeConfig?.startup ?? {}
   const backfillConfig = startupConfig?.backfill ?? {}
   const embeddingsConfig = startupConfig?.embeddings ?? {}
@@ -73,6 +86,10 @@ export function readMemoryOpsPolicy(mainConfig = {}) {
   const schedulerConfig = runtimeConfig?.scheduler ?? {}
 
   return {
+    features: {
+      reranker: featuresConfig.reranker === true,
+      temporalParser: featuresConfig.temporalParser === true,
+    },
     startup: {
       backfill: {
         mode: normalizeBackfillMode(backfillConfig.mode ?? DEFAULT_OPS_POLICY.startup.backfill.mode),
@@ -104,6 +121,14 @@ export function readMemoryOpsPolicy(mainConfig = {}) {
     scheduler: {
       checkIntervalMs: coercePositiveInt(schedulerConfig.checkIntervalMs, DEFAULT_OPS_POLICY.scheduler.checkIntervalMs),
     },
+  }
+}
+
+export function readMemoryFeatureFlags(mainConfig = {}) {
+  const policy = readMemoryOpsPolicy(mainConfig)
+  return {
+    reranker: envFlag(process.env.TRIB_MEMORY_ENABLE_RERANKER, policy.features.reranker),
+    temporalParser: envFlag(process.env.TRIB_MEMORY_ENABLE_TEMPORAL_PARSER, policy.features.temporalParser),
   }
 }
 

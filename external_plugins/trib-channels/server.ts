@@ -22,6 +22,7 @@ import { loadSettings, tryRead } from './lib/settings.js'
 import { Scheduler } from './lib/scheduler.js'
 import { WebhookServer } from './lib/webhook.js'
 import { EventPipeline } from './lib/event-pipeline.js'
+import { startCliWorker, stopCliWorker } from './lib/cli-worker-host.js'
 import {
   OutputForwarder,
   discoverSessionBoundTranscript,
@@ -123,6 +124,7 @@ ensureRuntimeDirs()
 killAllPreviousServers()
 writeServerPid()
 cleanupStaleRuntimeFiles()
+startCliWorker({ cwd: process.cwd(), env: { TRIB_CHANNELS_NO_CONNECT: '1' } })
 
 // ── Memory service ───────────────────────────────────────────────────
 // memory-service.mjs is managed by .mcp.json (trib-memory).
@@ -1673,6 +1675,7 @@ function shutdown(): void {
   }
   try { turnEndWatcher.close() } catch {}
   try { controlWorker?.kill() } catch {}
+  void stopCliWorker().catch(() => {})
   // memory-service lifecycle managed by .mcp.json
   // ML service removed — temporal parser is spawned by memory-service
   void stopOwnedRuntime('process shutdown')

@@ -1,144 +1,129 @@
 # Trib Memory Tuning Playbook
 
-이 문서는 `trib-memory` 리콜 튜닝을 다른 에이전트가 이어서 진행할 때 기준점으로 사용합니다.
+이 문서는 현재 `trib-memory`를 어떻게 점검하고 이어서 다듬을지에 대한 운영 기준입니다.
 
-## 목표
+## 현재 기준 구조
 
-- 실사용에 가까운 최종 리콜(`final`) 성능을 유지합니다.
-- `candidate` 단계 품질을 올립니다.
-- 같은 케이스셋에 과적합하지 않도록 날짜/도메인을 넓히며 검증합니다.
+지금 기준 메인 파이프라인:
 
-## 현재 기준점
-
-2026-04-02 기준 대표 벤치:
-
-- `tribgames-merged-cases.jsonl` 40-case
-  - `candidates`: `hit@1=62.5`, `hit@3=82.5`, `mrr=0.750`
-  - `final`: `hit@1=97.5`, `hit@3=100.0`, `mrr=0.983`
-
-참고:
-
-- `tribgames-extended-cases.jsonl` 20-case
-- `tribgames-2026-03-31-cases.jsonl` 20-case
-
-## 우선순위
-
-1. `final` 성능 유지
-2. `candidate` 성능 개선
-3. 더 넓은 케이스셋 확보
-
-`final`이 떨어지는 수정은 채택하지 않습니다.
-
-## 주요 파일
-
-- 검색/리콜 본체: `lib/memory.mjs`
-- 랭킹 보정: `lib/memory-ranking-utils.mjs`
-- query variant: `lib/memory-text-utils.mjs`
-- 단건 확인: `scripts/inspect-recall.mjs`
-- 벤치 실행: `scripts/benchmark-recall.mjs`
-- 반복 실행: `scripts/tune-benchmark-loop.mjs`
-
-## 작업 방식
-
-한 번에 하나만 바꿉니다.
-
-1. 벤치 baseline 실행
-2. candidate miss 패턴 확인
-3. 작은 수정 1개 적용
-4. merged benchmark 재실행
-5. `final`이 유지/개선되면 채택
-6. `final`이 하락하면 즉시 되돌림
-
-추천 수정 범위:
-
-- candidate ordering
-- seed lane bias
-- query variant expansion
-- task/history/decision intent-aware boost
-
-비추천:
-
-- 같은 케이스셋에 맞춘 과한 규칙 추가
-- `final`을 희생하면서 `candidate`만 올리는 수정
-- 자동 코드 수정 루프
-
-## 속도/운영 기준
-
-- 벤치와 inspect는 기본적으로 local `bge-m3`를 사용합니다.
-- ML service는 기본 후순위가 아니라 opt-in이어야 합니다.
-- `--refresh-copy`로 tmp mirror를 사용합니다.
-- cycle/catch-up과 interactive path는 분리해서 생각합니다.
-- live startup 정책은 `memory.runtime.startup`에서 관리합니다.
-  - `backfill`: `if-empty/always/off` + `7d/30d/all`
-  - `embeddings`: `off/light/full`
-  - `cycle1CatchUp`, `cycle2CatchUp`: `off/light/full`
-- 주기 체크는 `memory.runtime.scheduler.checkIntervalMs`로 조절합니다.
-- cycle 실행 비용은 `memory.cycle1.maxCandidatesPerBatch`, `memory.cycle1.maxBatches`, `memory.cycle1.embeddingRefresh.*`, `memory.cycle2.maxDays`, `memory.cycle2.embeddingRefresh.*`로 조절합니다.
-
-## 반복 실행
-
-한 번 실행:
-
-```bash
-node /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/benchmark-recall.mjs \
-  --data-dir /Users/jyp/.claude/plugins/data/trib-memory-tribgames \
-  --cases-file /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/benchmarks/tribgames-merged-cases.jsonl \
-  --top-k 3 \
-  --format compact \
-  --refresh-copy
+```text
+episodes
+-> cycle1 classification
+-> cycle2 correction
+-> cycle3 context.md refresh
 ```
 
-루프 실행:
+메인 저장 축:
 
-```bash
-node /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/tune-benchmark-loop.mjs \
-  --data-dir /Users/jyp/.claude/plugins/data/trib-memory-tribgames \
-  --max-iterations 20 \
-  --patience 4
+- `episodes`
+- `classifications`
+- `history/context.md`
+
+즉 예전의 `facts/tasks/signals/profiles/entities/relations/propositions`는 메인 파이프라인 기준으로 퇴역했습니다.
+
+## 현재 핵심 점검 항목
+
+1. `classifications`가 정상 적재되는지
+2. `searchRelevantHybrid()`가 `classification -> episode` 중심으로 결과를 내는지
+3. `buildInboundMemoryContext()`가 classification hint를 주는지
+4. `context.md`가 classification 중심으로 갱신되는지
+5. delta embedding이 정상 작동하는지
+
+## 기본 smoke 체크
+
+최소 smoke 시 기대 결과:
+
+- episode append 가능
+- classification upsert 가능
+- classification 임베딩 가능
+- query 시 `classification`이 1순위로 뜸
+- hint에 `<hint type="classification" ...>`가 포함됨
+
+## 현재 운영 포인트
+
+- embedding 기본값: `ollama/bge-m3`
+- `reranker`: 기본 `off`
+- `temporalParser`: 기본 `off`
+- AI 실행: 서버 내부 직접 spawn이 아니라 worker child를 통해 IPC로 호출
+
+## worker 구조 점검
+
+각 서버는 아래 패턴을 유지합니다.
+
+```text
+server
+-> fork(worker)
+-> IPC request/response
+-> worker spawn(cli)
 ```
 
-Cycle1 benchmark:
+현재 반영 대상:
 
-```bash
-node /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/cycle1-benchmark.mjs \
-  --cases-file /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/benchmarks/cycle1-sample-cases.jsonl
-```
+- `trib-memory`
+- `trib-search`
+- `trib-channels`
 
-Cycle1 extended benchmark:
+점검 포인트:
 
-```bash
-node /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/cycle1-benchmark.mjs \
-  --cases-file /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/benchmarks/cycle1-extended-cases.jsonl
-```
+- 서버 시작 시 worker가 뜨는지
+- 서버 종료 시 worker도 같이 내려가는지
+- worker child에서만 CLI가 실행되는지
+- 서버 본체가 직접 `codex` / `claude`를 장시간 물고 있지 않은지
 
-Cycle1 loop:
+## 지금부터의 개선 우선순위
 
-```bash
-node /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/cycle1-tune-loop.mjs \
-  --cases-file /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/benchmarks/cycle1-sample-cases.jsonl \
-  --max-iterations 10 \
-  --patience 3
-```
+1. 문서/설명/도구 스펙의 잔여 legacy 표현 제거
+2. `memory.mjs`의 old schema helper 완전 제거
+3. `memory-service.mjs`의 도구 표면을 `classifications + episodes` 기준으로 더 줄이기
+4. 실제 데이터셋에서 classification coverage 확인
+5. `context.md` 포맷 다듬기
 
-Reranker latency:
+## 더 이상 우선순위가 아닌 것
 
-```bash
-node /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/measure-reranker-latency.mjs \
-  --models Xenova/bge-reranker-large \
-  --pairs-file /Users/jyp/Project/trib-plugins/external_plugins/trib-memory/scripts/benchmarks/reranker-latency-sample.jsonl
+현재 기준으로는 아래는 메인 경로가 아닙니다.
+
+- facts/task 기반 메모리 확장
+- signal/profile/entity/relation graph 확장
+- old proposition pipeline 복원
+
+즉 새 구조 안정화 전에는 이 경로들을 다시 키우지 않습니다.
+
+## 점검용 최소 실행 예시
+
+개념적으로는 아래 흐름만 확인하면 됩니다.
+
+1. episode 추가
+2. classification 추가
+3. classification 임베딩
+4. 검색
+5. hint 생성
+6. context.md 생성
+
+현재 기대 결과 예시:
+
+```json
+[
+  {
+    "type": "classification",
+    "content": "업무 | 자동 바인딩 | 디스코드 | 확인 필요"
+  },
+  {
+    "type": "episode",
+    "content": "디스코드 자동 바인딩 상태 확인이 필요합니다"
+  }
+]
 ```
 
 ## 종료 기준
 
-다음 중 하나면 종료합니다.
+다음이 모두 만족되면 현재 단순화 라운드는 마감입니다.
 
-- 3~5회 연속 유의미한 개선 없음
-- `final` 지표가 흔들리기 시작함
-- merged 40-case와 날짜별 세트 모두에서 안정적인 값 확인
+- old runtime path가 실제 검색/힌트/컨텍스트 경로에서 더 이상 사용되지 않음
+- classification/episode 중심 smoke가 안정적으로 통과
+- context.md가 classification 중심으로 일관되게 생성됨
+- 세 MCP 서버 worker 구조가 공통 패턴으로 맞춰짐
 
-## 마무리 산출물
+## 관련 문서
 
-- 최종 benchmark 수치
-- best iteration 결과 파일
-- 남은 hard miss 목록
-- 다음 우선순위 2~3개
+- [../RETRIEVAL-CLASSIFICATION-PLAN.md](../RETRIEVAL-CLASSIFICATION-PLAN.md)
+- [../README.md](../README.md)
