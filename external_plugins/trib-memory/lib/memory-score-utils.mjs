@@ -136,7 +136,7 @@ export function computeTimeFactor(ts, config = DEFAULT_SCORING, importance = nul
 
 export function computeImportanceBoost(importance) {
   const tagFactor = getTagFactor(importance)
-  return 1 + (1 - tagFactor) * 0.1
+  return 1 + (1 - tagFactor) * 0.05
 }
 
 // ── Language factor ──────────────────────────────────────────────────
