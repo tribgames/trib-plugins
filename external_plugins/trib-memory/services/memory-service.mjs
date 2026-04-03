@@ -191,6 +191,7 @@ function getCycleLastRun() {
 
 async function checkCycles(options = {}) {
   if (_rebuildLock) return
+  if (mainConfig?.memory?.enabled === false) return
   const startup = options.startup === true
   const now = Date.now()
   const last = getCycleLastRun()
