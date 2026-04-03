@@ -36,21 +36,36 @@ function respond(content) {
   }));
 }
 
-// Wait for port file (service may still be starting), poll every 500ms, max 30s
-function waitForPort(cb) {
+// Wait for service to be ready (health check), poll every 1s, max 30s
+function waitForService(cb) {
   const deadline = Date.now() + 30000;
   function check() {
-    try {
-      const port = fs.readFileSync(PORT_FILE, 'utf8').trim();
-      if (port) return cb(port);
-    } catch {}
-    if (Date.now() >= deadline) return cb(null);
-    setTimeout(check, 500);
+    let port;
+    try { port = fs.readFileSync(PORT_FILE, 'utf8').trim(); } catch {}
+    if (!port) {
+      if (Date.now() >= deadline) return cb(null);
+      return setTimeout(check, 1000);
+    }
+    // HTTP health check — service actually responding?
+    const req = http.get(`http://localhost:${port}/health`, { timeout: 2000 }, (res) => {
+      if (res.statusCode === 200) return cb(port);
+      if (Date.now() >= deadline) return cb(null);
+      setTimeout(check, 1000);
+    });
+    req.on('error', () => {
+      if (Date.now() >= deadline) return cb(null);
+      setTimeout(check, 1000);
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      if (Date.now() >= deadline) return cb(null);
+      setTimeout(check, 1000);
+    });
   }
   check();
 }
 
-waitForPort((port) => {
+waitForService((port) => {
   if (!port) {
     respond(contextContent);
     return;
