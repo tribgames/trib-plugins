@@ -20,17 +20,14 @@ import {
   buildFtsQuery,
   firstTextContent,
   getShortTokensForLike,
-  candidateScore,
   insertCandidateUnits,
   looksLowSignal,
   shortTokenMatchScore,
   tokenizeMemoryText,
-  generateQueryVariants,
   localNow,
   localDateStr,
 } from './memory-text-utils.mjs'
 import {
-  isHistoryQuery,
   parseTemporalHint,
 } from './memory-query-plan.mjs'
 import {
@@ -59,7 +56,7 @@ import {
   vacuumDatabase as vacuumDatabaseImpl,
 } from './memory-maintenance-store.mjs'
 import { buildInboundMemoryContext as buildInboundMemoryContextImpl } from './memory-context-builder.mjs'
-import { DEFAULT_MEMORY_TUNING, mergeMemoryTuning } from './memory-tuning.mjs'
+import { mergeMemoryTuning } from './memory-tuning.mjs'
 import { getTagFactor } from './memory-score-utils.mjs'
 import { readMemoryFeatureFlags } from './memory-ops-policy.mjs'
 // memory-score-utils imports removed — scoring consolidated into 3-stage pipeline
@@ -631,7 +628,7 @@ export class MemoryStore {
       }
       const shouldCandidate =
         (entry.role === 'user' && episodeKind === 'message') ||
-        (entry.role === 'assistant' && episodeKind === 'message' && candidateScore(clean, 'assistant') > 0)
+        (entry.role === 'assistant' && episodeKind === 'message')
       if (shouldCandidate) {
         insertCandidateUnits(this.insertCandidateStmt, finalEpisodeId, ts, dayKey, entry.role, clean)
       }
