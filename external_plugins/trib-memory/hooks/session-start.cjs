@@ -36,28 +36,40 @@ function respond(content) {
   }));
 }
 
-// Fetch /recent → generate session context → inject with context.md
-let port;
-try {
-  port = fs.readFileSync(PORT_FILE, 'utf8').trim();
-} catch {
-  respond(contextContent);
-  process.exit(0);
+// Wait for port file (service may still be starting), poll every 500ms, max 30s
+function waitForPort(cb) {
+  const deadline = Date.now() + 30000;
+  function check() {
+    try {
+      const port = fs.readFileSync(PORT_FILE, 'utf8').trim();
+      if (port) return cb(port);
+    } catch {}
+    if (Date.now() >= deadline) return cb(null);
+    setTimeout(check, 500);
+  }
+  check();
 }
 
-const req = http.get(`http://localhost:${port}/recent`, { timeout: 5000 }, (res) => {
-  let body = '';
-  res.on('data', (chunk) => { body += chunk; });
-  res.on('end', () => {
-    try {
-      const data = JSON.parse(body);
-      const recent = data.recent || '';
-      const merged = [contextContent, recent].filter(Boolean).join('\n\n');
-      respond(merged);
-    } catch {
-      respond(contextContent);
-    }
+waitForPort((port) => {
+  if (!port) {
+    respond(contextContent);
+    return;
+  }
+
+  const req = http.get(`http://localhost:${port}/recent`, { timeout: 5000 }, (res) => {
+    let body = '';
+    res.on('data', (chunk) => { body += chunk; });
+    res.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const recent = data.recent || '';
+        const merged = [contextContent, recent].filter(Boolean).join('\n\n');
+        respond(merged);
+      } catch {
+        respond(contextContent);
+      }
+    });
   });
+  req.on('error', () => respond(contextContent));
+  req.on('timeout', () => { req.destroy(); respond(contextContent); });
 });
-req.on('error', () => respond(contextContent));
-req.on('timeout', () => { req.destroy(); respond(contextContent); });
