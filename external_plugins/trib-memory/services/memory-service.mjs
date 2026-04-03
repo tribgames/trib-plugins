@@ -475,6 +475,7 @@ async function handleCycle(args) {
 
 const MEMORY_INSTRUCTIONS = [
   '## Memory Tool Policy',
+  'Session context is auto-injected at start (Core Memory + Last Session + Key Conversations). If auto-injected context is insufficient, use recall_memory(session="last") for more detail.',
   'If the answer depends on past conversations, dates, categories, topics, elements, or ongoing context and you are not already certain, call recall_memory before replying. Do not guess from memory-context alone.',
   'recall_memory: memory search and retrieval tool.',
   '- query: hybrid search (grep mode). Combine with date to narrow by date.',
