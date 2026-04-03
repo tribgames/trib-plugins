@@ -1,9 +1,4 @@
 import { cleanMemoryText } from './memory-extraction.mjs'
-import { DEFAULT_MEMORY_TUNING } from './memory-tuning.mjs'
-
-function clamp01(value) {
-  return Math.max(0, Math.min(1, Number(value) || 0))
-}
 
 export function formatHintAge(ts, nowTs = Date.now()) {
   if (!ts) return ''
@@ -39,6 +34,14 @@ export function buildHintKey(item, overrides = {}) {
 }
 
 export function formatHintTag(item, overrides = {}, _options = {}) {
-  const text = String(overrides.text ?? item?.content ?? item?.text ?? item?.value ?? '').slice(0, 200)
-  return `<hint>${text}</hint>`
+  const type = overrides.type ?? item?.type ?? 'episode'
+  if (type === 'classification') {
+    const topic = item?.topic || ''
+    const element = item?.element || ''
+    const text = [topic, element].filter(Boolean).join(' — ')
+    return text ? `- ${text}` : ''
+  }
+  const raw = String(overrides.text ?? item?.content ?? item?.text ?? item?.value ?? '')
+  const text = raw.replace(/\s+/g, ' ').trim().slice(0, 200)
+  return text ? `- ${text}` : ''
 }
