@@ -35,8 +35,10 @@ import {
   pruneToRecent,
   getCycleStatus,
   runCycle1,
+  runCycle3,
   autoFlush,
   readMainConfig,
+  parseInterval,
 } from '../lib/memory-cycle.mjs'
 import { localNow } from '../lib/memory-text-utils.mjs'
 import {
@@ -54,7 +56,7 @@ const DATA_DIR = process.env.CLAUDE_PLUGIN_DATA
   || (() => {
     // Fallback: find plugin data dir by convention
     const candidates = [
-      path.join(os.homedir(), '.claude', 'plugins', 'data', 'trib-memory-trib-memory'),
+      path.join(os.homedir(), '.claude', 'plugins', 'data', 'trib-memory-tribgames'),
     ]
     for (const c of candidates) {
       if (fs.existsSync(path.join(c, 'memory.sqlite'))) return c
@@ -67,7 +69,9 @@ if (!DATA_DIR) {
 }
 process.stderr.write(`[memory-service] DATA_DIR=${DATA_DIR}\n`)
 
-const PORT_FILE = path.join(os.tmpdir(), 'trib-memory', 'memory-port')
+const RUNTIME_DIR = path.join(os.tmpdir(), 'trib-memory')
+try { fs.mkdirSync(RUNTIME_DIR, { recursive: true }) } catch {}
+const PORT_FILE = path.join(RUNTIME_DIR, 'memory-port')
 const BASE_PORT = 3350
 const MAX_PORT = 3357
 
@@ -171,13 +175,11 @@ let _rebuildLock = false
 
 const cycle1Config = mainConfig?.memory?.cycle1 ?? {}
 const cycle1IntervalStr = cycle1Config.interval || '5m'
-const cycle1Ms = (() => {
-  const m = cycle1IntervalStr.match(/^(\d+)(s|m|h)$/)
-  if (!m) return 300_000
-  const n = Number(m[1])
-  return m[2] === 's' ? n * 1000 : m[2] === 'm' ? n * 60_000 : n * 3600_000
-})()
-const cycle2Ms = 24 * 60 * 60 * 1000 // 24 hours
+const cycle1Ms = parseInterval(cycle1IntervalStr)
+const cycle2IntervalStr = mainConfig?.memory?.cycle2?.interval || '1h'
+const cycle2Ms = parseInterval(cycle2IntervalStr)
+const cycle3IntervalStr = mainConfig?.memory?.cycle3?.interval || '24h'
+const cycle3Ms = parseInterval(cycle3IntervalStr)
 
 function getCycleLastRun() {
   try {
@@ -185,8 +187,9 @@ function getCycleLastRun() {
     return {
       cycle1: state?.cycle1?.lastRunAt ? new Date(state.cycle1.lastRunAt).getTime() : 0,
       cycle2: state?.lastSleepAt ? new Date(state.lastSleepAt).getTime() : 0,
+      cycle3: state?.lastCycle3At ? new Date(state.lastCycle3At).getTime() : 0,
     }
-  } catch { return { cycle1: 0, cycle2: 0 } }
+  } catch { return { cycle1: 0, cycle2: 0, cycle3: 0 } }
 }
 
 async function checkCycles(options = {}) {
@@ -199,6 +202,7 @@ async function checkCycles(options = {}) {
   const pendingEmbeds = getPendingEmbedCount()
   const cycle1Due = now - last.cycle1 >= cycle1Ms
   const cycle2Due = now - last.cycle2 >= cycle2Ms
+  const cycle3Due = now - last.cycle3 >= cycle3Ms
 
   // cycle1: lastRunAt + interval elapsed
   if (
@@ -221,7 +225,7 @@ async function checkCycles(options = {}) {
     }
   }
 
-  // cycle2: lastSleepAt + 24h elapsed
+  // cycle2: interval-based (default 1h)
   if (
     startup
       ? shouldRunCycleCatchUp('cycle2', opsPolicy, {
@@ -236,6 +240,16 @@ async function checkCycles(options = {}) {
       process.stderr.write(`[cycle2] completed at ${localNow()}${startup ? ' [startup-catchup]' : ''}\n`)
     } catch (e) {
       process.stderr.write(`[cycle2] error: ${e.message}\n`)
+    }
+  }
+
+  // cycle3: interval-based (default 24h)
+  if (cycle3Due) {
+    try {
+      await runCycle3(WORKSPACE_PATH)
+      process.stderr.write(`[cycle3] completed at ${localNow()}\n`)
+    } catch (e) {
+      process.stderr.write(`[cycle3] error: ${e.message}\n`)
     }
   }
 
@@ -406,6 +420,50 @@ async function handleGlob(options) {
   return { text: lines.join('\n') || '(no matching dates)' }
 }
 
+function handleTagQuery(tag, limit = 20) {
+  const rows = store.db.prepare(`
+    SELECT topic, element, importance, updated_at FROM classifications
+    WHERE status = 'active' AND importance LIKE ?
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(`%${tag}%`, limit)
+  if (rows.length === 0) return { text: `(no ${tag} classifications found)` }
+  const lines = rows.map(r => {
+    const date = String(r.updated_at || '').slice(0, 10)
+    return `[${date}] ${r.topic} — ${r.element}`
+  })
+  return { text: `${tag} (${rows.length}):\n${lines.join('\n')}` }
+}
+
+function handleStats() {
+  const episodes = store.db.prepare('SELECT COUNT(*) as c FROM episodes').get().c
+  const classifications = store.db.prepare('SELECT COUNT(*) as c FROM classifications').get().c
+  const pending = store.db.prepare("SELECT COUNT(*) as c FROM memory_candidates WHERE status='pending'").get().c
+  const consolidated = store.db.prepare("SELECT COUNT(*) as c FROM memory_candidates WHERE status='consolidated'").get().c
+  const tags = store.db.prepare(`
+    SELECT importance, COUNT(*) as c FROM classifications
+    WHERE importance IS NOT NULL AND importance != ''
+    GROUP BY importance ORDER BY c DESC
+  `).all()
+  const embeds = store.db.prepare('SELECT COUNT(*) as c FROM pending_embeds').get().c
+  const lastCycle = (() => {
+    try {
+      const state = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'memory-cycle.json'), 'utf8'))
+      const ago = Date.now() - (state.lastCycle1At || 0)
+      return `${Math.round(ago / 60000)}m ago`
+    } catch { return 'unknown' }
+  })()
+
+  const lines = [
+    `episodes: ${episodes}`,
+    `classifications: ${classifications} (${tags.map(t => `${t.importance}:${t.c}`).join(', ')})`,
+    `candidates: pending=${pending}, consolidated=${consolidated}`,
+    `pending_embeds: ${embeds}`,
+    `last_cycle1: ${lastCycle}`,
+  ]
+  return { text: lines.join('\n') }
+}
+
 async function handleRecallSingle(args) {
   const query = String(args.query ?? '').trim()
   const session = String(args.session ?? '').trim()
@@ -415,6 +473,14 @@ async function handleRecallSingle(args) {
   const limit = Math.max(1, Number(args.limit ?? 10))
   const contextLines = Math.max(0, Number(args.context ?? 0))
 
+  // Shortcut queries
+  if (query === 'stats') return handleStats()
+  if (query === 'rules') return handleTagQuery('rule', limit)
+  if (query === 'decisions') return handleTagQuery('decision', limit)
+  if (query === 'goals') return handleTagQuery('goal', limit)
+  if (query === 'preferences') return handleTagQuery('preference', limit)
+  if (query === 'incidents') return handleTagQuery('incident', limit)
+  if (query === 'directives') return handleTagQuery('directive', limit)
   if (query && !session) {
     return handleGrep(query, { date, sort, offset, limit, context: contextLines })
   }
@@ -484,27 +550,46 @@ const MEMORY_INSTRUCTIONS = [
   '## Memory System',
   '',
   '### How it works',
-  'Session start: Core Memory + Last Session + Key Conversations are auto-injected.',
-  'Each message: relevant memory hints are auto-injected.',
-  'recall_memory: search or browse past conversations when needed.',
+  'Session start: Core Memory + Recent conversation are auto-injected.',
+  'Each message: relevant memory hints are auto-injected via hook.',
+  'recall_memory: search or browse past conversations when hints are insufficient.',
   '',
-  '### When to use recall_memory',
-  'Auto-injected context (hints + session start) covers most cases. Only call recall_memory when:',
-  '- Injected context is insufficient to understand what the user is referring to',
-  '- User asks about a past event, decision, or discussion and hints do not cover it',
-  '- User mentions a specific time period and you need episodes from that period',
-  '- You are unsure about something that may have been discussed before — search, never guess',
+  '### recall_memory — single tool, auto-routed by params',
   '',
-  '### recall_memory params',
-  '- query: search text → hybrid search (keyword + embedding)',
-  '- session: "last" | "current" | session ID → read conversation',
-  '- date: "2026-04-02" → read that day, "2026-04-*" → list dates',
+  '**Search** (hybrid keyword + embedding):',
+  '  recall_memory(query="검색어")',
+  '  recall_memory(query="검색어", sort="date")',
+  '  recall_memory(query="검색어", date="2026-04-02")  — search within date',
+  '',
+  '**Read** (browse conversation):',
+  '  recall_memory(session="last")  — previous session',
+  '  recall_memory(session="current")  — this session',
+  '  recall_memory(date="2026-04-02")  — read specific day',
+  '',
+  '**List** (find dates):',
+  '  recall_memory(date="2026-04-*")  — list matching dates',
+  '',
+  '**Stats** (system status):',
+  '  recall_memory(query="stats")  — episodes, classifications, pending, cycle status',
+  '',
+  '**Tag shortcuts** (browse classifications by tag):',
+  '  recall_memory(query="rules")  — all rule classifications',
+  '  recall_memory(query="decisions") / "goals" / "preferences" / "incidents" / "directives"',
+  '',
+  '**Batch** (multiple lookups in one call):',
+  '  recall_memory(queries=[{query:"A"}, {date:"2026-04-01"}, ...])',
+  '',
+  '### Common params',
+  '- limit: max results (default 10)',
+  '- offset: skip N results for pagination',
+  '- context: N surrounding episodes (grep mode, like grep -C)',
   '- sort: "relevance" (default) | "date"',
-  '- queries: array of above for batch lookup',
   '',
   '### Rules',
+  '- Never query the database directly (sqlite, SQL). Always use recall_memory.',
   '- Trust current code/config over recalled memory if they conflict.',
   '- Do not write to MEMORY.md or memory/ folder. This system handles persistence.',
+  '- Store work documents in ~/Project/docs/, never in plugin directories.',
 ].join('\n')
 
 const mcp = new Server(
@@ -531,8 +616,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'recall_memory',
-      annotations: { title: 'Recall Memory' },
-      description: 'Search and retrieve memory. Auto-routes: query→search, session→read, date+wildcard→list.\n\nExamples:\n- recall_memory(query="MCP 설정") — hybrid search\n- recall_memory(session="last") — previous session episodes\n- recall_memory(date="2026-04-02") — read day\n- recall_memory(date="2026-04-*") — list matching dates\n- recall_memory(query="버그 수정", date="2026-04-01") — search within date',
+      annotations: { title: 'Recall Memory', readOnlyHint: true, openWorldHint: false },
+      description: 'Search and retrieve memory. Auto-routes by params: query→search, session→read, date+wildcard→list, query="stats"→status, query="rules"→tag browse.',
       inputSchema: {
         type: 'object',
         properties: {

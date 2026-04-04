@@ -27,7 +27,7 @@ function main() {
         return;
       }
       fetchHints(message, (hints) => {
-        if (!hints) {
+        if (!hints || !hints.trim() || hints.trim() === '<memory-context>\n</memory-context>') {
           respond({});
           return;
         }

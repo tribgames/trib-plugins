@@ -1,12 +1,13 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { embedText } from './embedding-provider.mjs'
+import { embedText, getEmbeddingModelId } from './embedding-provider.mjs'
 import { cleanMemoryText } from './memory-extraction.mjs'
 import { buildHintKey, formatHintTag } from './memory-context-utils.mjs'
 import { readMemoryFeatureFlags } from './memory-ops-policy.mjs'
 import { parseTemporalHint } from './memory-query-plan.mjs'
 import { looksLowSignalQuery, tokenizeMemoryText } from './memory-text-utils.mjs'
+import { cosineSimilarity } from './memory-vector-utils.mjs'
 
 function nextDateStr(value) {
   const date = new Date(`${String(value).slice(0, 10)}T00:00:00`)
@@ -46,15 +47,11 @@ export async function buildInboundMemoryContext(store, query, options = {}) {
   const queryTokenCount = Math.max(1, tokenizeMemoryText(clean).length)
   const featureFlags = readMemoryFeatureFlags(readContextBuilderConfig(store))
   const queryVector = await measureStage('embed_query', () => embedText(clean))
-  const focusVector = await measureStage('build_focus', () => store.buildRecentFocusVector({
-    channelId: options.channelId,
-    userId: options.userId,
-  }))
   const pushHint = (item, overrides = {}) => {
     const rawText = String(overrides.text ?? item.content ?? item.text ?? item.value ?? '').trim()
     if (!rawText) return
-    // weighted_score >= 0.01 threshold (low-quality hints filtered)
-    if (item.weighted_score == null || item.weighted_score < 0.01) return
+    // weighted_score >= 0.02 threshold (low-quality hints filtered)
+    if (item.weighted_score == null || item.weighted_score < 0.02) return
     const key = buildHintKey(item, overrides)
     if (!key) return
     if (seenHintKeys.has(key)) return
@@ -64,14 +61,21 @@ export async function buildInboundMemoryContext(store, query, options = {}) {
 
   let relevant = await measureStage('hybrid_search', () => store.searchRelevantHybrid(clean, limit, {
     queryVector,
-    focusVector,
     channelId: options.channelId,
     userId: options.userId,
     recordRetrieval: false,
     tuning,
   }))
   relevant = relevant
-    .filter(item => item.type === 'classification' || item.type === 'episode')
+    .filter(item => {
+      if (item.type !== 'classification' && item.type !== 'episode') return false
+      // Filter out short noisy episodes (ㅎㅇ, ㅇㅇ, ㄱㄱ etc.)
+      if (item.type === 'episode') {
+        const text = String(item.content || '').replace(/\s+/g, '')
+        if (text.length < 5) return false
+      }
+      return true
+    })
     .slice(0, Math.max(3, limit))
 
   if (relevant.length > 0) {
@@ -157,7 +161,7 @@ export async function buildInboundMemoryContext(store, query, options = {}) {
       }
 
       // Fallback: history=3 days, event=7 days
-      const fallbackDays = intent.primary === 'event' ? '-7 days' : '-3 days'
+      const fallbackDays = '-3 days'
       const dateFilter = startDate
         ? `AND ts >= '${startDate}' AND ts < '${endDate}'`
         : `AND ts >= datetime('now', '${fallbackDays}')`
@@ -180,12 +184,48 @@ export async function buildInboundMemoryContext(store, query, options = {}) {
     } catch {}
   }
 
-  if (lines.length === 0) return ''
-  const ctx = `<memory-context>\n${lines.join('\n')}\n</memory-context>`
+  // Passive mention tracking: update decay counters for core_memory items
+  // that are semantically similar to the user message (fire-and-forget)
+  if (Array.isArray(queryVector) && queryVector.length > 0) {
+    try {
+      const activeModel = getEmbeddingModelId()
+      const coreMemoryVectors = store.db.prepare(`
+        SELECT mv.entity_id, mv.vector_json
+        FROM memory_vectors mv
+        JOIN core_memory cm ON cm.id = mv.entity_id
+        WHERE mv.entity_type = 'core_memory'
+          AND mv.model = ?
+          AND cm.status = 'active'
+      `).all(activeModel)
+      const nowTs = Math.floor(Date.now() / 1000)
+      const mentionedIds = []
+      for (const row of coreMemoryVectors) {
+        try {
+          const vec = JSON.parse(row.vector_json)
+          if (!Array.isArray(vec) || vec.length === 0) continue
+          const sim = cosineSimilarity(queryVector, vec)
+          if (sim >= 0.4) mentionedIds.push(row.entity_id)
+        } catch { /* skip malformed vectors */ }
+      }
+      if (mentionedIds.length > 0) {
+        const placeholders = mentionedIds.map(() => '?').join(',')
+        store.db.prepare(`
+          UPDATE core_memory
+          SET retrieval_count = retrieval_count + 1,
+              last_retrieved_at = ?
+          WHERE id IN (${placeholders})
+        `).run(nowTs, ...mentionedIds)
+      }
+    } catch { /* passive tracking should never break hint delivery */ }
+  }
+
+  const validLines = lines.filter(l => l && l.trim())
+  if (validLines.length === 0) return ''
+  const ctx = `<memory-context>\n${validLines.join('\n')}\n</memory-context>`
   const totalMs = Date.now() - totalStartedAt
   process.stderr.write(
     `[memory-timing] q="${clean.slice(0, 40)}" total=${totalMs}ms ${stageTimings.join(' ')}\n`,
   )
-  process.stderr.write(`[memory] recall q="${clean.slice(0, 40)}" intent=${intent.primary} hints=${lines.filter(l => l.startsWith('<hint ')).length}\n`)
+  process.stderr.write(`[memory] recall q="${clean.slice(0, 40)}" hints=${lines.filter(l => l.startsWith('<hint ')).length}\n`)
   return ctx
 }

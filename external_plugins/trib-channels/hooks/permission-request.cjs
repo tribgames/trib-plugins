@@ -17,6 +17,7 @@ const DATA_DIR = process.env.CLAUDE_PLUGIN_DATA;
 if (!DATA_DIR) process.exit(0);
 
 const RUNTIME_ROOT = path.join(os.tmpdir(), 'trib-channels');
+try { fs.mkdirSync(RUNTIME_ROOT, { recursive: true }); } catch {}
 const ACTIVE_INSTANCE_FILE = path.join(RUNTIME_ROOT, 'active-instance.json');
 
 // Skip when channels are not enabled in this session.

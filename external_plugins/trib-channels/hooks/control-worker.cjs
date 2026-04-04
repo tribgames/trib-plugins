@@ -7,6 +7,7 @@ const instanceId = process.argv[2];
 if (!instanceId) process.exit(1);
 
 const runtimeRoot = path.join(os.tmpdir(), 'trib-channels');
+try { fs.mkdirSync(runtimeRoot, { recursive: true }); } catch {}
 const controlFile = path.join(runtimeRoot, `control-${instanceId}.json`);
 const responseFile = path.join(runtimeRoot, `control-${instanceId}.response.json`);
 

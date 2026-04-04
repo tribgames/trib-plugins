@@ -3,6 +3,7 @@ const os = require('os');
 const path = require('path');
 
 const RUNTIME_ROOT = path.join(os.tmpdir(), 'trib-channels');
+try { fs.mkdirSync(RUNTIME_ROOT, { recursive: true }); } catch {}
 const ACTIVE_INSTANCE_FILE = path.join(RUNTIME_ROOT, 'active-instance.json');
 
 // Read the hook event from stdin and ignore sidechain stop events only.
