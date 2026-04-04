@@ -58,7 +58,7 @@ async function isExecutable(path) {
 function runInstall(command, args) {
   const result = spawnSync(command, args, {
     cwd: pluginData,
-    stdio: 'inherit',
+    stdio: ['ignore', 'pipe', 'inherit'],
     env: process.env,
   })
 
